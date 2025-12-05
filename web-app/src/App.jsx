@@ -1,10 +1,73 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
+import ModelSelector from './components/ModelSelector';
+import Settings from './components/Settings';
+import PromptInput from './components/PromptInput';
 
 function App() {
+    const [model, setModel] = useState('nano_banana');
+    const [prompt, setPrompt] = useState('');
+    const [aspectRatio, setAspectRatio] = useState('1:1');
+    const [resolution, setResolution] = useState('1024x1024');
+    const [useReference, setUseReference] = useState(false);
+
+    // Initialize Telegram WebApp
+    useEffect(() => {
+        const tg = window.Telegram?.WebApp;
+        if (tg) {
+            tg.ready();
+            tg.MainButton.text = useReference ? "ДАЛЕЕ (ОТПРАВИТЬ ФОТО)" : "СГЕНЕРИРОВАТЬ";
+            tg.MainButton.color = "#F4D03F";
+            tg.MainButton.textColor = "#000000";
+
+            // Setup MainButton visibility based on prompt
+            if (prompt.trim().length > 0) {
+                tg.MainButton.show();
+            } else {
+                tg.MainButton.hide();
+            }
+
+            // Handle MainButton click
+            const handleMainBtn = () => {
+                const data = {
+                    action: 'generate',
+                    model,
+                    prompt,
+                    aspect_ratio: aspectRatio,
+                    resolution: resolution,
+                    use_reference: useReference
+                };
+                tg.sendData(JSON.stringify(data));
+            };
+
+            tg.onEvent('mainButtonClicked', handleMainBtn);
+            return () => {
+                tg.offEvent('mainButtonClicked', handleMainBtn);
+            };
+        }
+    }, [model, prompt, aspectRatio, resolution, useReference]);
+
     return (
-        <div style={{ padding: '20px', fontFamily: 'sans-serif', textAlign: 'center' }}>
-            <h1>🍌 Nano Banana</h1>
-            <p>Генератор изображений готов к работе!</p>
+        <div className="app-container">
+            <h1 style={{ textAlign: 'center', color: '#F4D03F' }}>🍌 Nano Banana</h1>
+
+            <ModelSelector value={model} onChange={setModel} />
+
+            <PromptInput
+                prompt={prompt}
+                onPromptChange={setPrompt}
+                showReferenceUpload={model !== 'imagen'} // Flash and Pro support it
+                useReference={useReference}
+                onToggleReference={setUseReference}
+            />
+
+            <Settings
+                model={model}
+                aspectRatio={aspectRatio}
+                onAspectRatioChange={setAspectRatio}
+                resolution={resolution}
+                onResolutionChange={setResolution}
+            />
+
         </div>
     );
 }

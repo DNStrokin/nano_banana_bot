@@ -1,11 +1,121 @@
 :root {
-  color-scheme: light dark;
+  --primary-color: #F4D03F;
+  /* Banana Yellow */
+  --bg-color: #1a1a1a;
+  --card-bg: #2d2d2d;
+  --text-color: #ffffff;
+  --text-secondary: #aaaaaa;
+  --accent: #27AE60;
 }
 
 body {
   margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  padding: 16px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 10px 0;
+  font-weight: 600;
+}
+
+/* Cards */
+.cards {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.card {
+  background: var(--card-bg);
+  padding: 12px;
+  border-radius: 12px;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.card.selected {
+  border-color: var(--primary-color);
+  background: #3d3d2a;
+}
+
+.card-name {
+  font-weight: bold;
+  font-size: 1.1em;
+}
+
+.card-desc {
+  font-size: 0.9em;
+  color: var(--text-secondary);
+}
+
+/* Inputs */
+textarea {
+  width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #444;
+  background: var(--card-bg);
+  color: white;
+  font-family: inherit;
+  resize: none;
+  box-sizing: border-box;
+}
+
+textarea:focus {
+  outline: none;
+  border-color: var(--primary-color);
+}
+
+/* Chips */
+.chips {
   display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  background: var(--card-bg);
+  border: 1px solid #444;
+  color: white;
+  padding: 6px 12px;
+  border-radius: 20px;
+  cursor: pointer;
+}
+
+.chip.active {
+  background: var(--primary-color);
+  color: black;
+  border-color: var(--primary-color);
+}
+
+.upload-section {
+  margin-top: 10px;
+}
+
+.secondary-btn {
+  width: 100%;
+  padding: 10px;
+  background: #333;
+  border: 1px dashed #666;
+  color: #888;
+  border-radius: 8px;
+}
+
+.model-selector,
+.settings,
+.prompt-input {
+  margin-bottom: 24px;
 }
