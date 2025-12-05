@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  bot:
+    build: ./bot
+    env_file: .env
+    depends_on:
+      - db
+    restart: always
+    volumes:
+      - ./bot:/app
+
+  webapp:
+    build: ./web-app
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web-app:/app
+      - /app/node_modules
+    command: npm run dev
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-nano_banana}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
