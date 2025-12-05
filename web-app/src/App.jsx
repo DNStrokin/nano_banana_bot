@@ -7,8 +7,16 @@ function App() {
     const [model, setModel] = useState('nano_banana');
     const [prompt, setPrompt] = useState('');
     const [aspectRatio, setAspectRatio] = useState('1:1');
-    const [resolution, setResolution] = useState('1024x1024');
+    const [resolution, setResolution] = useState('1K');
     const [useReference, setUseReference] = useState(false);
+    const [userLevel, setUserLevel] = useState('demo');
+
+    // Parse URL params on mount
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const lvl = params.get('level') || 'demo';
+        setUserLevel(lvl);
+    }, []);
 
     // Initialize Telegram WebApp
     useEffect(() => {
@@ -46,6 +54,9 @@ function App() {
         }
     }, [model, prompt, aspectRatio, resolution, useReference]);
 
+    const allowHighRes = userLevel === 'full' || userLevel === 'admin';
+    const canUploadPhoto = userLevel !== 'demo';
+
     return (
         <div className="app-container">
             <h1 style={{ textAlign: 'center', color: '#F4D03F' }}>🍌 Nano Banana</h1>
@@ -55,7 +66,7 @@ function App() {
             <PromptInput
                 prompt={prompt}
                 onPromptChange={setPrompt}
-                showReferenceUpload={model !== 'imagen'} // Flash and Pro support it
+                showReferenceUpload={model !== 'imagen' && canUploadPhoto} // Flash and Pro support it if level allows
                 useReference={useReference}
                 onToggleReference={setUseReference}
             />
@@ -66,6 +77,7 @@ function App() {
                 onAspectRatioChange={setAspectRatio}
                 resolution={resolution}
                 onResolutionChange={setResolution}
+                allowHighRes={allowHighRes}
             />
 
         </div>

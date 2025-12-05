@@ -102,7 +102,7 @@ async def cmd_start(message: types.Message):
         f"С возвращением, {message.from_user.full_name}! 🍌\n"
         f"Ваш уровень доступа: **{user.access_level.upper()}**.\n"
         f"Нажми кнопку ниже, чтобы открыть генератор.",
-        reply_markup=get_main_menu(),
+        reply_markup=get_main_menu(user.access_level),
         parse_mode="Markdown"
     )
 
@@ -138,6 +138,17 @@ async def process_access_callback(callback: CallbackQuery):
         pass # User blocked bot
     
     await callback.answer()
+
+def get_user_limits(level: str):
+    """
+    Returns (max_refs, can_use_high_res)
+    """
+    if level == 'admin' or level == 'full':
+        return 5, True
+    if level == 'basic':
+        return 3, False
+    # Demo
+    return 0, False
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message):
@@ -232,15 +243,20 @@ async def cmd_set_access(message: types.Message):
 class GenStates(StatesGroup):
     waiting_for_prompt = State()
     waiting_for_reference = State() # Keep for Web App compatibility if needed
+    dialogue = State()
 
 # --- Keyboards ---
 
-def get_main_menu():
+def get_main_menu(level: str = "demo"):
+    url = f"https://DNStrokin.github.io/nano_banana_bot/?level={level}"
     return types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="🍌 Открыть приложение", web_app=WebAppInfo(url="https://DNStrokin.github.io/nano_banana_bot/"))]
+            [types.KeyboardButton(text="🍌 Открыть приложение", web_app=WebAppInfo(url=url))],
+            [types.KeyboardButton(text="⚡ Flash"), types.KeyboardButton(text="🍌 Pro")],
+            [types.KeyboardButton(text="📸 Imagen"), types.KeyboardButton(text="❓ Помощь")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        input_field_placeholder="Выберите режим или откройте приложение"
     )
 
 def get_cancel_menu():
@@ -251,19 +267,36 @@ def get_cancel_menu():
         resize_keyboard=True
     )
 
+def get_dialogue_menu():
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="✅ Завершить диалог")]
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Напишите правки для картинки..."
+    )
+
 # --- Command Handlers ---
 
 @dp.message(Command("cancel"))
 @dp.message(F.text.lower() == "отмена")
 @dp.message(F.text.lower() == "cancel")
+@dp.message(F.text == "✅ Завершить диалог")
 async def cmd_cancel(message: types.Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    level = user.access_level if user else 'demo'
+
+    # Cleanup session
+    if message.chat.id in chat_sessions:
+        del chat_sessions[message.chat.id]
+
     current_state = await state.get_state()
     if current_state is None:
-        await message.answer("А нечего отменять. Мы на старте.", reply_markup=get_main_menu())
+        await message.answer("А нечего отменять. Мы на старте.", reply_markup=get_main_menu(level))
         return
 
     await state.clear()
-    await message.answer("🚫 Операция отменена. Возвращаемся в главное меню.", reply_markup=get_main_menu())
+    await message.answer("🚫 Операция отменена. Возвращаемся в главное меню.", reply_markup=get_main_menu(level))
 
 @dp.message(F.web_app_data)
 async def handle_web_app_data(message: types.Message, state: FSMContext):
@@ -272,19 +305,39 @@ async def handle_web_app_data(message: types.Message, state: FSMContext):
     except:
         return
 
+        if use_ref:
+            # Reusing the unified input handler state!
+            await state.set_state(GenStates.waiting_for_prompt)
+            await message.answer(
+                "🍌 **Принято!** Теперь отправьте 1-3 фото-референса.\n",
+                parse_mode="Markdown",
+                reply_markup=get_cancel_menu()
+            )
+        else:
+            # Immediate generation
+            await trigger_generation(message, state)
+
     if data.get('action') == 'generate':
-        use_ref = data.get('use_reference', False)
+        # Validate Resolution for Basic/Demo
+        user = await get_user(message.chat.id)
+        level = user.access_level if user else 'demo'
+        _, can_high_res = get_user_limits(level)
         
+        target_res = data.get('resolution', '1024x1024')
+        if not can_high_res and target_res != '1024x1024':
+             target_res = '1024x1024' # Force standard
+
         # Save params to FSM
         await state.update_data(
             prompt=data['prompt'],
             aspect_ratio=data.get('aspect_ratio', '1:1'),
-            resolution=data.get('resolution', '1024x1024'),
+            resolution=target_res,
             model=data.get('model', 'nano_banana')
         )
-
+        
+        use_ref = data.get('use_reference', False)
         if use_ref:
-            # Reusing the unified input handler state!
+             # Reusing the unified input handler state!
             await state.set_state(GenStates.waiting_for_prompt)
             await message.answer(
                 "🍌 **Принято!** Теперь отправьте 1-3 фото-референса.\n",
@@ -296,12 +349,18 @@ async def handle_web_app_data(message: types.Message, state: FSMContext):
             await trigger_generation(message, state)
 
 async def start_generation_flow(message: types.Message, state: FSMContext, model: str):
+    # Setup Cleanup
+    if message.chat.id in chat_sessions:
+        del chat_sessions[message.chat.id]
+
     # Access Check
     if not await check_access(message.chat.id, model):
+        user = await get_user(message.chat.id)
+        level = user.access_level if user else 'demo'
         await message.answer(
             f"⛔ Псс, парень! Модель `{model}` тебе недоступна.\n"
             "Постучись админу (или /start для запроса).", 
-            reply_markup=get_main_menu(),
+            reply_markup=get_main_menu(level),
             parse_mode="Markdown"
         )
         return
@@ -309,55 +368,83 @@ async def start_generation_flow(message: types.Message, state: FSMContext, model
     await state.set_state(GenStates.waiting_for_prompt)
     await state.update_data(model=model, ref_images=[], prompt="")
     
-    msg = (
+    model_messages = {
+        "imagen": (
+            "📸 **Режим: IMAGEN 4 FAST**\n\n"
+            "Фотореалистичная генерация нового поколения. 🚀\n"
+            "Опишите кадр, который хотите получить.\n\n"
+            "📐 **AR:** Поддерживается (например, `--ar 16:9`).\n"
+            "🚫 **Референсы:** Не поддерживаются в этом режиме.\n\n"
+            "👇 Жду ваше описание..."
+        ),
+        "nano_banana": (
+            "🍌 **Режим: NANO BANANA**\n\n"
+            "Быстрая генерация на базе Gemini 2.5 Flash. ⚡\n"
+            "Отлично понимает сложные промпты!\n\n"
+            "📐 **AR:** `--ar 16:9`, `4:3` и др.\n"
+            "📸 **Референсы:** Можно прикрепить до 3 фото.\n\n"
+            "👇 Что рисуем?"
+        ),
+        "nano_banana_pro": (
+            "🍌 **Режим: NANO BANANA PRO**\n\n"
+            "Мощная модель Gemini 3 Pro с поддержкой диалога! 💬\n"
+            "Максимальное качество и понимание контекста.\n\n"
+            "📐 **AR:** `--ar 16:9`, `4:3` и др.\n"
+            "🖥 **Разрешение:** `--2k`, `--4k` (для Full).\n"
+            "📸 **Референсы:** До 5 штук (для Full).\n"
+            "🗣 **Диалог:** После генерации можно просить правки.\n\n"
+            "👇 Опишите вашу идею..."
+        )
+    }
+
+    msg = model_messages.get(model, (
         f"🍌 **Режим: {model.upper()}**\n\n"
         "Опишите, что будем творить. 🎨\n"
-        "В конце можно добавить `--ar 16:9` (или `4:3`, `3:4`...).\n\n"
-        "📸 **Референсы:** Можно прикрепить до 3 штук (скрепкой).\n\n"
+        "В конце можно добавить `--ar 16:9`.\n\n"
         "👇 Жду ваших мыслей..."
-    )
+    ))
     await message.answer(msg, reply_markup=get_cancel_menu(), parse_mode="Markdown")
 
+
+
+@dp.message(Command("help"))
+@dp.message(F.text == "❓ Помощь")
+async def cmd_help(message: types.Message):
+    user = await get_user(message.chat.id)
+    level = user.access_level if user else 'demo'
+    
+    help_text = (
+        "📚 **Справка**\n\n"
+        "⚡ **Flash**: Экономный и быстрый. Хорош для артов.\n"
+        "🍌 **Pro**: Умный. Понимает нюансы и ведет диалог.\n"
+        "📸 **Imagen**: Только для реалистичных фото.\n\n"
+        "🎨 **WebApp**: Нажмите 'Открыть приложение', чтобы настроить всё визуально!"
+    )
+    await message.answer(help_text, parse_mode="Markdown", reply_markup=get_main_menu(level))
+
 @dp.message(Command("pro"))
+@dp.message(F.text == "🍌 Pro")
 async def cmd_pro(message: types.Message, state: FSMContext):
     await start_generation_flow(message, state, "nano_banana_pro")
 
 @dp.message(Command("flash"))
+@dp.message(F.text == "⚡ Flash")
 async def cmd_flash(message: types.Message, state: FSMContext):
     await start_generation_flow(message, state, "nano_banana")
 
 @dp.message(Command("imagen"))
+@dp.message(F.text == "📸 Imagen")
 async def cmd_imagen(message: types.Message, state: FSMContext):
     await start_generation_flow(message, state, "imagen")
 
-@dp.message(F.web_app_data)
-async def handle_web_app_data(message: types.Message, state: FSMContext):
-    data = json.loads(message.web_app_data.data)
-    
-    if data.get('action') == 'generate':
-        use_ref = data.get('use_reference', False)
-        
-        # Save params to FSM
-        await state.update_data(
-            prompt=data['prompt'],
-            aspect_ratio=data.get('aspect_ratio', '1:1'),
-            resolution=data.get('resolution', '1024x1024'),
-            model=data.get('model', 'nano_banana')
-        )
 
-        if use_ref:
-            # Reusing the unified input handler state!
-            await state.set_state(GenStates.waiting_for_prompt)
-            await message.answer(
-                "🍌 **Принято!** Теперь отправьте 1-3 фото-референса.\n",
-                parse_mode="Markdown",
-                reply_markup=get_cancel_menu()
-            )
-        else:
-            # Immediate generation
-            await trigger_generation(message, state)
 
 async def trigger_generation(message: types.Message, state: FSMContext):
+    # 0. Context & Access
+    user = await get_user(message.chat.id)
+    level = user.access_level if user else 'demo'
+    max_refs, can_high_res = get_user_limits(level)
+
     data = await state.get_data()
     prompt = data.get('prompt', '').strip()
     model = data.get('model')
@@ -369,19 +456,39 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         return # Keep state
 
     # 2. Ref limits
-    if len(refs) > 3:
-        await message.answer(f"⚠️ Ого, {len(refs)} фото! Беру только первые 3, остальные — в архив.", reply_markup=get_cancel_menu())
-        refs = refs[:3] # Slice
+    if len(refs) > max_refs:
+        refs = refs[:max_refs]
+        await message.answer(f"✂️ Лимит фото для {level}: {max_refs}. Лишние убрал.")
+
+    # 3. Parse AR (Robust)
+    import re
+    ar = data.get('aspect_ratio', '1:1')
+    target_res = data.get('resolution', '1K')
     
-    # 3. Parse AR
-    ar = "1:1"
-    if "--ar" in prompt:
-        parts = prompt.split("--ar")
-        prompt = parts[0].strip()
-        if len(parts) > 1:
-            ar_candidates = parts[1].strip().split()
-            if ar_candidates:
-                ar = ar_candidates[0]
+    # Regex for various dashes: -, --, —, –
+    # Matches: (dash)ar (space) (value)
+    match_ar = re.search(r'(?:--|—|–|-)ar\s+(\d+:\d+)', prompt)
+    if match_ar:
+        ar = match_ar.group(1)
+        # Remove the flag from prompt
+        prompt = re.sub(r'(?:--|—|–|-)ar\s+\d+:\d+', '', prompt).strip()
+
+    # Regex for resolution: --1k, --2k, --4k
+    match_res = re.search(r'(?:--|—|–|-)(1k|2k|4k)', prompt, re.IGNORECASE)
+    if match_res:
+        requested_res = match_res.group(1).upper()
+        # Remove flag
+        prompt = re.sub(r'(?:--|—|–|-)(1k|2k|4k)', '', prompt, flags=re.IGNORECASE).strip()
+        
+        # Check permission
+        if requested_res in ['2K', '4K']:
+            if can_high_res:
+                target_res = requested_res
+            else:
+                await message.answer(f"⚠️ Разрешение {requested_res} доступно только Full/Admin. Использую 1K.")
+                target_res = '1K'
+        else:
+             target_res = '1K'
 
     # 4. Status Message
     from aiogram.utils.markdown import hide_link
@@ -408,9 +515,9 @@ async def trigger_generation(message: types.Message, state: FSMContext):
             return "токенов"
 
     MODEL_NAMES = {
-        "nano_banana": "Nano Banana (Flash)",
-        "nano_banana_pro": "Nano Banana (Pro)",
-        "imagen": "Imagen 3 (Fast)"
+        "nano_banana": "Nano Banana (Gemini 2.5 Flash)",
+        "nano_banana_pro": "Nano Banana Pro (Gemini 3 Pro)",
+        "imagen": "Imagen 4 Fast"
     }
 
     try:
@@ -424,27 +531,57 @@ async def trigger_generation(message: types.Message, state: FSMContext):
                 image_bytes_list.append(io_bytes.read())
 
         # Call API
-        image_bytes, token_count = await nano_service.generate_image(
+        # Retrieve existing chat session if in dialogue mode
+        chat_session = None
+        current_state = await state.get_state()
+        if current_state == GenStates.dialogue:
+             chat_session = chat_sessions.get(message.chat.id)
+
+        image_bytes, token_count, new_chat_session = await nano_service.generate_image(
             prompt=prompt,
             aspect_ratio=ar,
-            resolution="1024x1024", 
+            resolution=target_res,
             model_type=model,
-            reference_images=image_bytes_list
+            reference_images=image_bytes_list,
+            chat_session=chat_session
         )
         
         # Mark Completed
         await update_generation_status(gen_id, 'completed', token_count)
         
+        # Save session if exists
+        if new_chat_session:
+            chat_sessions[message.chat.id] = new_chat_session
+
         # Format Caption
         model_display = MODEL_NAMES.get(model, model)
         token_text = f"Использовано {token_count} {get_token_suffix(token_count)}"
+        
+        final_caption = f"✨ Готово! {model_display}\n{token_text}\n\n🍌 @dimastro_banana_bot"
+
+        # Logic for Dialogue continuation
+        user = await get_user(message.chat.id)
+        level = user.access_level if user else 'demo'
+        
+        keyboard = get_main_menu(level)
+        
+        if (level == 'admin' or level == 'full') and model == 'nano_banana_pro':
+             final_caption += "\n\n💬 **Редактирование:** Напишите, что изменить (или нажмите кнопку)."
+             await state.set_state(GenStates.dialogue)
+             keyboard = get_dialogue_menu()
+             # We keep data (model, etc) in state
+        else:
+             await state.clear()
+             # Clear session if not continuing
+             if message.chat.id in chat_sessions:
+                 del chat_sessions[message.chat.id]
         
         # Send Result
         photo = BufferedInputFile(image_bytes, filename=f"banana_{model}.png")
         await message.answer_photo(
             photo, 
-            caption=f"✨ Готово! {model_display}\n{token_text}\n\n🍌 @dimastro_banana_bot",
-            reply_markup=get_main_menu() 
+            caption=final_caption,
+            reply_markup=keyboard 
         )
         
         # Cleanup status
@@ -455,12 +592,24 @@ async def trigger_generation(message: types.Message, state: FSMContext):
 
     except Exception as e:
         await update_generation_status(gen_id, 'failed')
-        await message.answer(f"❌ Упс! Ошибка: {e}", reply_markup=get_main_menu())
-    finally:
-        await state.clear()
-
-# Task storage for debounce
+        await message.answer(f"❌ Упс! Ошибка: {e}", reply_markup=get_main_menu(level))
+        if message.chat.id in chat_sessions:
+            del chat_sessions[message.chat.id]
+    
+# In-memory session storage (simple approach for single instance bot)
+chat_sessions = {}
 processing_tasks = {}
+
+@dp.message(GenStates.dialogue)
+async def process_dialogue_step(message: types.Message, state: FSMContext):
+    # All commands/cancels are handled by upstream handlers.
+    # If we are here, it's a refinement prompt text.
+    
+    # Treat as refinement prompt
+    await state.update_data(prompt=message.text) 
+    await state.update_data(ref_images=[]) # Clear refs for text-only edit
+    
+    await trigger_generation(message, state)
 
 @dp.message(GenStates.waiting_for_prompt)
 async def process_prompt_input(message: types.Message, state: FSMContext):
@@ -470,15 +619,33 @@ async def process_prompt_input(message: types.Message, state: FSMContext):
     
     # 1. Capture Text/Caption
     text = message.text or message.caption
+    
+    # Check for Cancel explicitly
+    if text and text.lower() in ["отмена", "cancel", "❌ отмена"]:
+         await cmd_cancel(message, state)
+         return
+
     if text and not text.startswith("/"): # Ignore commands just in case
         await state.update_data(prompt=text) # Overwrite prompt with latest text
     
     # 2. Capture Photos
     if message.photo:
-        refs = data.get('ref_images', [])
-        photo = message.photo[-1] # Best quality
-        refs.append(photo.file_id)
-        await state.update_data(ref_images=refs)
+        user_level = (await get_user(message.from_user.id)).access_level
+        max_refs, _ = get_user_limits(user_level)
+        
+        if max_refs == 0:
+             await message.answer("⚠️ Ваш уровень доступа (Demo) работает только с текстом. Фото не принимаются.")
+             return
+
+        refs = list(data.get('ref_images', []))
+        current_refs_count = len(refs)
+        if current_refs_count >= max_refs:
+            await message.answer(f"⚠️ Лимит фото для вашего уровня: {max_refs}. Это фото не добавлено.")
+            # Don't add, but continue debounce so generation starts with existing refs
+        else:
+            photo = message.photo[-1] # Best quality
+            refs.append(photo.file_id)
+            await state.update_data(ref_images=refs)
 
     # 3. Debounce (Smart Delay)
     key = (message.chat.id, message.from_user.id)
@@ -492,6 +659,21 @@ async def process_prompt_input(message: types.Message, state: FSMContext):
 
     processing_tasks[key] = asyncio.create_task(delayed_generation())
 
+@dp.message(F.text)
+async def handle_unknown_text(message: types.Message, state: FSMContext):
+    # This triggers if no other handler caught it (e.g. not a command, not in FSM state)
+    user = await get_user(message.chat.id)
+    level = user.access_level if user else 'demo'
+
+    msg = (
+        "🤖 **Я вас не понял.**\n"
+        "Сейчас мы не в режиме генерации или диалога.\n\n"
+        "🔹 **Хотите рисовать?** Выберите режим в меню (Flash/Pro/Imagen).\n"
+        "🔹 **Хотите поговорить?** Диалог поддерживается **только** в режиме `/pro` (для Full/Admin). В режимах Flash/Imagen диалог после генерации не работает.\n\n"
+        "Для новой генерации нажмите одну из кнопок ниже 👇"
+    )
+    await message.answer(msg, reply_markup=get_main_menu(level), parse_mode="Markdown")
+
 async def main():
     logging.info("Starting bot...")
     
@@ -499,9 +681,9 @@ async def main():
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
         types.BotCommand(command="help", description="Справка и список команд"),
-        types.BotCommand(command="pro", description="Генерация Pro (Gemini 3)"),
-        types.BotCommand(command="flash", description="Генерация Flash (Быстро)"),
-        types.BotCommand(command="imagen", description="Генерация Imagen (Фото)"),
+        types.BotCommand(command="pro", description="Nano Banana PRO (Gemini 3 Pro)"),
+        types.BotCommand(command="flash", description="Nano Banana (Gemini 2.5 Flash)"),
+        types.BotCommand(command="imagen", description="Imagen 4 (Только фото)"),
     ]
     await bot.set_my_commands(commands)
     
