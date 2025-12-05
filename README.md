@@ -35,5 +35,12 @@ Nano Banana Bot — это Telegram-бот с интегрированным Min
    docker-compose up --build
    ```
 
+## Обновление Web App
+Чтобы обновить веб-приложение на GitHub Pages, используйте автоматический скрипт:
+```powershell
+.\deploy.ps1
+```
+*(Скрипт собирает проект и пушит в ветку `gh-pages`)*
+
 ## Лицензия
 MIT
