@@ -1109,12 +1109,11 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         await message.answer_photo(
              photo,
              caption=final_caption,
-             reply_markup=result_inline,
              parse_mode="Markdown"
         )
 
-        # Send reply keyboard separately (answer_photo only supports inline keyboards)
-        await message.answer("Выберите действие:", reply_markup=reply_keyboard)
+        # Send inline buttons in separate message
+        await message.answer("Выберите действие:", reply_markup=result_inline)
 
 
         
