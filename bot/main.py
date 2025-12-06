@@ -1102,8 +1102,10 @@ async def trigger_generation(message: types.Message, state: FSMContext):
              final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
              await state.set_state(GenStates.dialogue_standby)
              reply_keyboard = get_dialogue_menu()
+             logging.info(f"DIALOGUE: Activated for model {model}, tariff {tariff}")
              # Don't clear chat session for dialogue models
         else:
+             logging.info(f"DIALOGUE: NOT activated for model {model}, tariff {tariff}, supports_dialogue={supports_dialogue}")
              await state.clear()
              # Clear session if not continuing
              if message.chat.id in chat_sessions:
@@ -1266,6 +1268,8 @@ async def show_creation_start(message: types.Message, user: User, is_edit=False)
 
 @dp.message(GenStates.dialogue_standby)
 async def process_dialogue_standby(message: types.Message, state: FSMContext):
+    logging.info(f"DIALOGUE: process_dialogue_standby triggered for user {message.from_user.id}")
+
     # 1. Capture Input
     dialogue_text = message.text or message.caption
     ref_image = None
@@ -1691,9 +1695,11 @@ async def cmd_tariffs_text(message: types.Message):
 async def handle_unknown_text(message: types.Message, state: FSMContext):
     # This triggers if no other handler caught it (e.g. not a command, not in FSM state)
     current_state = await state.get_state()
+    logging.info(f"UNKNOWN: handle_unknown_text triggered. State: {current_state}, User: {message.from_user.id}")
 
     # Don't handle messages that are in dialogue states
     if current_state and current_state.startswith('GenStates:'):
+        logging.info(f"UNKNOWN: Ignoring message in state {current_state}")
         return
 
     user = await get_user(message.chat.id)
