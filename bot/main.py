@@ -736,15 +736,6 @@ def get_cancel_menu():
         resize_keyboard=True
     )
 
-def get_dialogue_menu():
-    return types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="✅ Завершить диалог")]
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Напишите правки для картинки..."
-    )
-
 # --- Command Handlers ---
 
 @dp.message(F.text == "🔙 Назад")
@@ -1086,12 +1077,16 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         res_clean = target_res # e.g. 1024x1024 or 4K. Should be safe.
         
         # Inline Result Actions
-        result_inline = InlineKeyboardMarkup(inline_keyboard=[
+        result_inline_rows = [
             [
                 InlineKeyboardButton(text="🔄 Создать ещё", callback_data=f"create:again:{model}:{ar_safe}:{res_clean}"),
                 InlineKeyboardButton(text="⬅️ К другой модели", callback_data="create:back:start")
             ]
-        ])
+        ]
+        # Добавим кнопку завершения диалога (inline), чтобы не засорять reply-клавиатуру
+        if supports_dialogue:
+            result_inline_rows.append([InlineKeyboardButton(text="❌ Завершить диалог", callback_data="dialogue:finish")])
+        result_inline = InlineKeyboardMarkup(inline_keyboard=result_inline_rows)
         
         # Check if dialogue is supported
         model_meta = MODEL_DISPLAY.get(model, {})
@@ -1102,7 +1097,6 @@ async def trigger_generation(message: types.Message, state: FSMContext):
              await state.set_state(GenStates.dialogue_standby)
              if tariff != 'demo':
                  final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
-                 reply_keyboard = get_dialogue_menu()
                  logging.info(f"DIALOGUE: Activated for model {model}, tariff {tariff}")
              else:
                  # Демо: диалог недоступен, но оставляем минимальную клавиатуру и очищаем чат-сессию
@@ -1356,6 +1350,20 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
     action = callback.data.split(":")[1]
     data = await state.get_data()
 
+    async def finish_dialog():
+        # Clear FSM and chat session
+        await state.clear()
+        if callback.message.chat.id in chat_sessions:
+            del chat_sessions[callback.message.chat.id]
+        # Temp notification with minimal menu
+        finish_msg = await callback.message.answer("✅ Диалог завершен.", reply_markup=get_minimal_menu())
+        asyncio.create_task(delete_message_delayed(finish_msg, 3))
+        # Try delete the inline control message to убрать лишнее
+        try:
+            await callback.message.delete()
+        except:
+            pass
+
     if action == "upgrade":
         # Send user to tariff upgrade
         await callback.message.delete()
@@ -1372,14 +1380,17 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
 
     elif action == "cancel":
         # Cancel dialogue - delete messages
-        await callback.message.delete()
+        try:
+            await callback.message.delete()
+        except:
+            pass
         user_msg_id = data.get("user_message_id")
         if user_msg_id:
             try:
                 await callback.bot.delete_message(callback.message.chat.id, user_msg_id)
             except:
                 pass
-        await state.clear()
+        await finish_dialog()
         await callback.answer()
 
     elif action == "confirm":
@@ -1403,6 +1414,9 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
             await processing_msg.delete()
         except:
             pass
+    elif action == "finish":
+        await finish_dialog()
+        await callback.answer()
 
 @dp.message(F.text == "🎨 К созданию")
 
