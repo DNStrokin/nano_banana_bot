@@ -1457,7 +1457,9 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
 async def cmd_creation_entry(message: types.Message, state: FSMContext):
     user = await get_user(message.from_user.id)
     # Update Reply Keyboard (Minimal)
-    await message.answer("🎨 **Мастерская**", reply_markup=get_minimal_menu())
+    workshop_msg = await message.answer("🎨 **Мастерская**", reply_markup=get_minimal_menu())
+    # Запомним ID, чтобы потом удалить при старте генерации
+    await state.update_data(workshop_message_id=workshop_msg.message_id)
     # Show Inline UI
     await show_creation_start(message, user)
 
@@ -1718,6 +1720,15 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
          except:
              pass
          await state.update_data(config_message_id=None)
+    
+    # Удаляем сообщение "Мастерская", чтобы не засоряло диалог
+    workshop_msg_id = data.get("workshop_message_id")
+    if workshop_msg_id:
+         try:
+             await message.bot.delete_message(chat_id=message.chat.id, message_id=workshop_msg_id)
+         except:
+             pass
+         await state.update_data(workshop_message_id=None)
     
     # Generate!
     # trigger_generation сам устанавливает нужное состояние (dialogue_standby или очищает),
