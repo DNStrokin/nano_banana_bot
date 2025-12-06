@@ -1076,6 +1076,10 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         ar_safe = ar.replace(':', '_')
         res_clean = target_res # e.g. 1024x1024 or 4K. Should be safe.
         
+        # Check if dialogue is supported
+        model_meta = MODEL_DISPLAY.get(model, {})
+        supports_dialogue = model_meta.get("supports_dialogue", False)
+
         # Inline Result Actions
         result_inline_rows = [
             [
@@ -1087,10 +1091,6 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         if supports_dialogue:
             result_inline_rows.append([InlineKeyboardButton(text="❌ Завершить диалог", callback_data="dialogue:finish")])
         result_inline = InlineKeyboardMarkup(inline_keyboard=result_inline_rows)
-        
-        # Check if dialogue is supported
-        model_meta = MODEL_DISPLAY.get(model, {})
-        supports_dialogue = model_meta.get("supports_dialogue", False)
 
         if supports_dialogue:
              # Включаем режим ожидания диалога для всех, даже для демо, чтобы ловить их сообщения
