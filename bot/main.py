@@ -1423,6 +1423,22 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
             is_dialogue_continuation=True
         )
 
+        # Удаляем действия/индикаторы, чтобы не нажимали во время новой генерации
+        actions_msg_id = data.get("actions_msg_id")
+        if actions_msg_id:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, actions_msg_id)
+            except:
+                pass
+            await state.update_data(actions_msg_id=None)
+        indicator_id = data.get("dialogue_indicator_msg_id")
+        if indicator_id:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, indicator_id)
+            except:
+                pass
+            await state.update_data(dialogue_indicator_msg_id=None)
+
         # Call trigger logic
         await trigger_generation(callback.message, state)
         await callback.answer()
