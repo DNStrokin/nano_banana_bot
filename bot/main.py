@@ -1563,6 +1563,16 @@ async def process_create_callback(callback: CallbackQuery, state: FSMContext):
     elif action == "again":
          # create:again:model:ar_safe:res
          # e.g. create:again:nano_banana:16_9:1024x1024
+         # Убираем индикатор диалога, если он был
+         data = await state.get_data()
+         indicator_id = data.get("dialogue_indicator_msg_id")
+         if indicator_id:
+             try:
+                 await callback.bot.delete_message(callback.message.chat.id, indicator_id)
+             except:
+                 pass
+             await state.update_data(dialogue_indicator_msg_id=None)
+         # actions_msg сохранять не нужно, оно будет перезаписано после новой генерации
          if len(parts) >= 5:
              model_id = parts[2]
              ar_safe = parts[3]
@@ -1581,6 +1591,15 @@ async def process_create_callback(callback: CallbackQuery, state: FSMContext):
              # If message is photo (result), cannot edit_text -> send new
              # If text (menu), edit it
              can_edit = (callback.message.content_type == "text")
+             # Удаляем индикатор диалога при возврате
+             data = await state.get_data()
+             indicator_id = data.get("dialogue_indicator_msg_id")
+             if indicator_id:
+                 try:
+                     await callback.bot.delete_message(callback.message.chat.id, indicator_id)
+                 except:
+                     pass
+                 await state.update_data(dialogue_indicator_msg_id=None)
              await show_creation_start(callback.message, user, is_edit=can_edit)
     
     await callback.answer()
@@ -1764,6 +1783,15 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
 @dp.message(F.text == "🏠 Главное меню")
 async def cmd_main_menu_text(message: types.Message, state: FSMContext):
     await state.clear()
+    # Удаляем индикатор диалога, если был
+    data = await state.get_data()
+    indicator_id = data.get("dialogue_indicator_msg_id")
+    if indicator_id:
+        try:
+            await message.bot.delete_message(message.chat.id, indicator_id)
+        except:
+            pass
+        await state.update_data(dialogue_indicator_msg_id=None)
     await cmd_start(message)
 
 @dp.message(F.text == "👤 Мой кабинет")
