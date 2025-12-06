@@ -1119,8 +1119,12 @@ async def trigger_generation(message: types.Message, state: FSMContext):
              parse_mode="Markdown"
         )
 
-        # Send inline buttons in separate message
+        # Send inline buttons and update reply keyboard
         await message.answer("Выберите действие:", reply_markup=result_inline)
+
+        # Update reply keyboard for dialogue mode
+        if supports_dialogue and tariff != 'demo':
+            await message.answer("💬 Режим диалога активен", reply_markup=reply_keyboard)
 
 
         
