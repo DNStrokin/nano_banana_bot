@@ -556,7 +556,7 @@ async def cmd_add_nc(message: types.Message):
         await message.answer(f"Error: {e}")
 
 @dp.message(Command("profile"))
-@dp.message(F.text == "👤 Мой кабинет")
+@dp.message(F.text.startswith("👤 Мой кабинет"))
 async def cmd_profile(message: types.Message):
     user = await get_user(message.from_user.id)
     user = await enforce_tariff_expiry(user, message)
@@ -1855,11 +1855,11 @@ async def cmd_main_menu_text(message: types.Message, state: FSMContext):
         await state.update_data(dialogue_indicator_msg_id=None)
     await cmd_start(message)
 
-@dp.message(F.text == "👤 Мой кабинет")
+@dp.message(F.text.startswith("👤 Мой кабинет"))
 async def cmd_profile_text(message: types.Message):
     await cmd_profile(message)
 
-@dp.message(F.text == "💎 Тарифы")
+@dp.message(F.text.startswith("💎 Тарифы"))
 async def cmd_tariffs_text(message: types.Message):
     await cmd_upgrade(message)
 
