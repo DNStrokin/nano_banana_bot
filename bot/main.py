@@ -7,6 +7,7 @@ from aiogram import F
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 import json
+from datetime import datetime
 from config import config
 from database import init_db, add_or_update_user, get_user, update_user_access, log_generation, get_stats, get_all_users_stats, update_generation_status, get_user_balance, update_balance, set_user_tariff, User, Generation, async_session
 from sqlalchemy import select, func
@@ -24,6 +25,21 @@ dp = Dispatcher()
 # --- Auth Logic ---
 
 ADMIN_IDS = [int(id.strip()) for id in config.ADMIN_IDS.split(",")]
+
+async def enforce_tariff_expiry(user: User | None, message: types.Message) -> User | None:
+    """
+    Если срок тарифа истёк и это не demo/admin — даунгрейдим до DEMO и уведомляем.
+    """
+    if not user:
+        return user
+    if user.tariff_expires_at and user.tariff not in ["demo", "admin"]:
+        if datetime.now() >= user.tariff_expires_at:
+            await set_user_tariff(user.id, "demo", days=None)
+            await update_user_access(user.id, "demo")
+            user.tariff = "demo"
+            user.tariff_expires_at = None
+            await message.answer("⏳ Срок вашей подписки истёк. Тариф переключен на DEMO.")
+    return user
 
 async def check_access(user_id: int, model: str) -> bool:
     user = await get_user(user_id)
@@ -68,6 +84,9 @@ async def cmd_start(message: types.Message):
         message.from_user.username, 
         message.from_user.full_name
     )
+
+    # Проверка истечения тарифа с авто-даунгрейдом и уведомлением
+    user = await enforce_tariff_expiry(user, message)
     
     # If admin
     if message.from_user.id in ADMIN_IDS:
@@ -540,6 +559,7 @@ async def cmd_add_nc(message: types.Message):
 @dp.message(F.text == "👤 Мой кабинет")
 async def cmd_profile(message: types.Message):
     user = await get_user(message.from_user.id)
+    user = await enforce_tariff_expiry(user, message)
     if not user:
         return
         
@@ -826,9 +846,12 @@ async def start_generation_flow(message: types.Message, state: FSMContext, model
     if message.chat.id in chat_sessions:
         del chat_sessions[message.chat.id]
 
+    # Enforce tariff expiry before access checks
+    user = await get_user(message.chat.id)
+    user = await enforce_tariff_expiry(user, message)
+
     # Access Check
     if not await check_access(message.chat.id, model):
-        user = await get_user(message.chat.id)
         level = user.tariff if user else 'demo'
         balance = user.balance if user else None
         await message.answer(
@@ -917,6 +940,7 @@ async def cmd_imagen(message: types.Message, state: FSMContext):
 async def trigger_generation(message: types.Message, state: FSMContext):
     # 0. Context & Access
     user = await get_user(message.chat.id)
+    user = await enforce_tariff_expiry(user, message)
     # Fallback if no user (shouldn't happen)
     if not user:
         return
