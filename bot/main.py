@@ -1096,7 +1096,6 @@ async def trigger_generation(message: types.Message, state: FSMContext):
              # Включаем режим ожидания диалога для всех, даже для демо, чтобы ловить их сообщения
              await state.set_state(GenStates.dialogue_standby)
              if tariff != 'demo':
-                 final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
                  logging.info(f"DIALOGUE: Activated for model {model}, tariff {tariff}")
              else:
                  # Демо: диалог недоступен, но оставляем минимальную клавиатуру и очищаем чат-сессию
