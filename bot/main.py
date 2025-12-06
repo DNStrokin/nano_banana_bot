@@ -1118,10 +1118,13 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         )
 
         # Send inline buttons and update reply keyboard
-        await message.answer("Выберите действие:", reply_markup=result_inline)
+        actions_msg = await message.answer("Выберите действие:", reply_markup=result_inline)
 
         # Обновить реплай-клавиатуру: диалоговая или минимальная (чтобы убрать главное меню)
-        await message.answer("💬 Режим диалога", reply_markup=reply_keyboard)
+        if supports_dialogue:
+            dlg_msg = await message.answer("💬 Режим диалога", reply_markup=reply_keyboard)
+            # Сохраняем ID сообщения с индикатором диалога, чтобы можно было удалить при завершении
+            await state.update_data(dialogue_indicator_msg_id=dlg_msg.message_id, actions_msg_id=actions_msg.message_id)
 
 
         
@@ -1357,15 +1360,27 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
         # Temp notification
         finish_msg = await callback.message.answer("✅ Диалог завершен.")
         asyncio.create_task(delete_message_delayed(finish_msg, 3))
-        # Постоянное сообщение с минимальным меню, чтобы кнопка Главного меню не пропадала
-        user = await get_user(callback.from_user.id)
-        level = user.tariff if user else 'demo'
-        await callback.message.answer("🏠 Главное меню", reply_markup=get_minimal_menu())
-        # Try delete the inline control message to убрать лишнее
-        try:
-            await callback.message.delete()
-        except:
-            pass
+        # Удаляем индикатор "Режим диалога", если есть
+        indicator_id = data.get("dialogue_indicator_msg_id")
+        if indicator_id:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, indicator_id)
+            except:
+                pass
+        # Правим inline-кнопки у сообщения действий: оставляем только "Создать ещё" и "К другой модели"
+        actions_msg_id = data.get("actions_msg_id")
+        if actions_msg_id:
+            try:
+                ar_safe = data.get("aspect_ratio", "1:1").replace(":", "_")
+                res_clean = data.get("resolution", "1024x1024")
+                model = data.get("model", "nano_banana")
+                cleaned_markup = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="🔄 Создать ещё", callback_data=f"create:again:{model}:{ar_safe}:{res_clean}"),
+                    InlineKeyboardButton(text="⬅️ К другой модели", callback_data="create:back:start")
+                ]])
+                await callback.bot.edit_message_reply_markup(chat_id=callback.message.chat.id, message_id=actions_msg_id, reply_markup=cleaned_markup)
+            except:
+                pass
 
     if action == "upgrade":
         # Send user to tariff upgrade
