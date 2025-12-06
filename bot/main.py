@@ -1662,16 +1662,9 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
          await state.update_data(ref_images=refs)
          
     # Generate!
-    await trigger_generation(message, state) # Reads from state
-    
-    data = await state.get_data()
-    model = data.get("model", "")
-    
-    # Transition Logic
-    if "pro" in model:
-        await state.set_state(GenStates.dialogue)
-    else:
-        await state.clear()
+    # trigger_generation сам устанавливает нужное состояние (dialogue_standby или очищает),
+    # поэтому не трогаем состояние здесь, чтобы не сломать диалог.
+    await trigger_generation(message, state)
 
 
 @dp.message(F.text == "🏠 Главное меню")
