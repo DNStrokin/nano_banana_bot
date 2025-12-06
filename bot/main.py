@@ -1078,7 +1078,6 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         )
 
         # Logic for Dialogue continuation
-        # Re-fetch user to get latest state if needed
         # DEFAULT: Minimal menu + Inline Result Actions
         reply_keyboard = get_minimal_menu()
         
@@ -1098,12 +1097,18 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         model_meta = MODEL_DISPLAY.get(model, {})
         supports_dialogue = model_meta.get("supports_dialogue", False)
 
-        if supports_dialogue and tariff != 'demo':
-             final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
+        if supports_dialogue:
+             # Включаем режим ожидания диалога для всех, даже для демо, чтобы ловить их сообщения
              await state.set_state(GenStates.dialogue_standby)
-             reply_keyboard = get_dialogue_menu()
-             logging.info(f"DIALOGUE: Activated for model {model}, tariff {tariff}")
-             # Don't clear chat session for dialogue models
+             if tariff != 'demo':
+                 final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
+                 reply_keyboard = get_dialogue_menu()
+                 logging.info(f"DIALOGUE: Activated for model {model}, tariff {tariff}")
+             else:
+                 # Демо: диалог недоступен, но оставляем минимальную клавиатуру и очищаем чат-сессию
+                 if message.chat.id in chat_sessions:
+                     del chat_sessions[message.chat.id]
+                 logging.info(f"DIALOGUE: Demo user, showing upgrade prompt on next message.")
         else:
              logging.info(f"DIALOGUE: NOT activated for model {model}, tariff {tariff}, supports_dialogue={supports_dialogue}")
              await state.clear()
@@ -1122,9 +1127,8 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         # Send inline buttons and update reply keyboard
         await message.answer("Выберите действие:", reply_markup=result_inline)
 
-        # Update reply keyboard for dialogue mode
-        if supports_dialogue and tariff != 'demo':
-            await message.answer("💬 Режим диалога активен", reply_markup=reply_keyboard)
+        # Обновить реплай-клавиатуру: диалоговая или минимальная (чтобы убрать главное меню)
+        await message.answer("💬 Режим диалога", reply_markup=reply_keyboard)
 
 
         
@@ -1319,7 +1323,9 @@ async def process_dialogue_standby(message: types.Message, state: FSMContext):
     # 3. Save Context and show confirmation
     data = await state.get_data()
     model = data.get("model", "gemini-3-pro-image-preview")
-    cost = MODEL_PRICES.get(model, 400)  # Default to Pro price
+    # Use same pricing logic as основной триггер, включая надбавки за разрешение
+    resolution = data.get("resolution", "1024x1024")
+    cost = calculate_cost(model, resolution)
 
     # Show confirmation message with inline buttons
     confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -1343,20 +1349,6 @@ async def process_dialogue_standby(message: types.Message, state: FSMContext):
         dialogue_text=dialogue_text,
         dialogue_ref_file_id=ref_image.file_id if ref_image else None
     )
-    await state.set_state(GenStates.dialogue_confirm)
-    
-    msg = (
-        f"💬 **Продолжение диалога**\n"
-        f"Будет списано: **{cost} NC**.\n"
-        f"Продолжить?"
-    )
-    markup = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text=f"✅ Продолжить ({cost} NC)", callback_data="dialogue:continue"),
-            InlineKeyboardButton(text="❌ Завершить", callback_data="dialogue:finish")
-        ]
-    ])
-    await message.answer(msg, reply_markup=markup, parse_mode="Markdown")
     await state.set_state(GenStates.dialogue_confirm)
 
 @dp.callback_query(F.data.startswith("dialogue:"))
