@@ -1692,7 +1692,17 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
          refs = []
          refs.append(message.photo[-1].file_id)
          await state.update_data(ref_images=refs)
-         
+    
+    # Убираем меню конфигурации с кнопкой "Назад", чтобы в ожидании не вернуться к выбору модели
+    data = await state.get_data()
+    config_msg_id = data.get("config_message_id")
+    if config_msg_id:
+         try:
+             await message.bot.delete_message(chat_id=message.chat.id, message_id=config_msg_id)
+         except:
+             pass
+         await state.update_data(config_message_id=None)
+    
     # Generate!
     # trigger_generation сам устанавливает нужное состояние (dialogue_standby или очищает),
     # поэтому не трогаем состояние здесь, чтобы не сломать диалог.
