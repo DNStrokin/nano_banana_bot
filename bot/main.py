@@ -8,8 +8,11 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 import json
 from config import config
-from database import init_db, add_or_update_user, get_user, update_user_access, log_generation, get_stats, get_all_users_stats, update_generation_status
+from database import init_db, add_or_update_user, get_user, update_user_access, log_generation, get_stats, get_all_users_stats, update_generation_status, get_user_balance, update_balance, set_user_tariff, User, Generation, async_session
+from sqlalchemy import select, func
 from nano_service import nano_service
+from pricing import calculate_cost, validate_request, TARIFFS, PACKAGES, MODEL_PRICES, RUB_TO_NC
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -27,39 +30,29 @@ async def check_access(user_id: int, model: str) -> bool:
     if not user:
         return False
     
-    level = user.access_level
-    if level == 'admin' or user_id in ADMIN_IDS:
-        return True
-    if level == 'banned' or level == 'pending':
+    if user.access_level == 'banned':
         return False
-        
-    # Full access
-    if level == 'full':
+    if user.access_level == 'admin' or user_id in ADMIN_IDS:
         return True
-        
-    # Basic: Flash + Imagen
-    if level == 'basic' and model in ['nano_banana', 'imagen']:
-        return True
-        
-    # Demo: Imagen only
-    if level == 'demo' and model == 'imagen':
-        return True
-        
-    return False
 
-async def notify_admins_request(user: types.User):
+    # Use Tariff Logic
+    # We pass placeholders for res/refs/ar because this is just a preliminary "Can I open this menu?" check
+    # usage checks happen in trigger_generation
+    valid, reason = validate_request(user.tariff, model, None, 0, "1:1")
+    return valid
+
+async def notify_admins_request(user: User):
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Full Access", callback_data=f"access:full:{user.id}")],
-        [InlineKeyboardButton(text="Basic (Flash+Img)", callback_data=f"access:basic:{user.id}")],
-        [InlineKeyboardButton(text="Demo (Img Only)", callback_data=f"access:demo:{user.id}")],
-        [InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"access:banned:{user.id}")]
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")]
     ])
     
     text = (
-        f"👤 **Новый пользователь запросил доступ!**\n"
+        f"👤 **Новый пользователь зарегистрирован!**\n"
         f"Name: {user.full_name}\n"
         f"Username: @{user.username}\n"
-        f"ID: `{user.id}`"
+        f"ID: `{user.id}`\n"
+        f"Тариф: `{user.tariff}`\n"
+        f"Баланс: `{user.balance} NC`"
     )
     
     for admin_id in ADMIN_IDS:
@@ -79,75 +72,53 @@ async def cmd_start(message: types.Message):
     # If admin
     if message.from_user.id in ADMIN_IDS:
         await update_user_access(message.from_user.id, "admin")
-        user.access_level = "admin" # Update local object so next messages are correct
-        await message.answer("👑 Привет, Создатель! Вы авторизованы как Админ.")
+        user.tariff = "admin"
+        await message.answer("👑 Привет, Создатель! Вы авторизованы как Админ.\nТариф установлен на: **ADMIN**")
         # Show standard menu too
     
-    elif user.access_level == 'pending':
-        await message.answer(
-            f"Привет, {message.from_user.full_name}! 👋\n\n"
-            "Bot находится в закрытом режиме. Я отправил запрос администратору.\n"
-            "Как только доступ подтвердят, я пришлю уведомление!"
-        )
-        if created or user.access_level == 'pending': 
-            if created:
-                await notify_admins_request(message.from_user)
-        return
-
-    elif user.access_level == 'banned':
+    # Open Registration Logic
+    # Update local object access level if it was pending, because now we trust tariff
+    if user.access_level == 'pending':
+        await update_user_access(message.from_user.id, "demo") # Auto-approve as Demo
+        user.access_level = "demo"
+    
+    if user.access_level == 'banned' or user.tariff == 'banned':
         return # Ignore banned
-        
-    # If access granted, show menu
-    await message.answer(
-        f"С возвращением, {message.from_user.full_name}! 🍌\n"
-        f"Ваш уровень доступа: **{user.access_level.upper()}**.\n"
-        f"Нажми кнопку ниже, чтобы открыть генератор.",
-        reply_markup=get_main_menu(user.access_level),
-        parse_mode="Markdown"
-    )
 
-@dp.callback_query(F.data.startswith("access:"))
-async def process_access_callback(callback: CallbackQuery):
-    # Data format: access:level:user_id
-    parts = callback.data.split(":")
-    level = parts[1]
-    user_id = int(parts[2])
-    
-    # 1. Update DB
-    await update_user_access(user_id, level)
-    
-    # 2. Update Admin Message
-    admin_name = callback.from_user.first_name
-    await callback.message.edit_text(
-        f"{callback.message.text}\n\n✅ **Обработано {admin_name}:** Присвоен статус `{level}`",
-        parse_mode="Markdown",
-        reply_markup=None
-    )
-    
-    # 3. Notify User
-    try:
-        if level == 'banned':
-            await bot.send_message(user_id, "⛔ Ваш запрос на доступ был отклонен.")
-        else:
-            await bot.send_message(
-                user_id, 
-                f"🎉 **Доступ разрешен!**\nВаш уровень: `{level}`\n\nНажмите /start чтобы начать.",
-                parse_mode="Markdown"
-            )
-    except:
-        pass # User blocked bot
-    
-    await callback.answer()
+    # Welcome Message
+    # If newly created
+    if created:
+        await message.answer(
+            f"🍌 **Добро пожаловать в Nano Banana!**\n\n"
+            f"🎁 Вам начислен приветственный бонус: **500 NC**!\n"
+            f"Ваш тариф: **ДЕМО**.\n\n"
+            f"Используйте /profile чтобы проверить баланс.\n"
+            f"Нажмите кнопку ниже, чтобы начать рисовать!",
+            reply_markup=get_main_menu(user.tariff),
+            parse_mode="Markdown"
+        )
+        await notify_admins_request(user)
+    else:
+        await message.answer(
+            f"С возвращением, {message.from_user.full_name}! 🍌\n"
+            f"Ваш тариф: **{user.tariff.upper()}**.\n"
+            f"Нажми кнопку ниже, чтобы открыть генератор.",
+            reply_markup=get_main_menu(user.tariff),
+            parse_mode="Markdown"
+        )
+
+
 
 def get_user_limits(level: str):
     """
     Returns (max_refs, can_use_high_res)
     """
-    if level == 'admin' or level == 'full':
-        return 5, True
-    if level == 'basic':
-        return 3, False
-    # Demo
+    level = level.lower()
+    t = TARIFFS.get(level)
+    if t:
+        return t.get('max_refs', 0), t.get('can_use_2k_4k', False)
+        
+    # Validation for banned/pending
     return 0, False
 
 @dp.message(Command("admin"))
@@ -157,32 +128,324 @@ async def cmd_admin(message: types.Message):
         
     users_count, gens_count, recent_gens = await get_stats()
     
-    stats_text = (
-        f"📊 **Статистика**\n"
-        f"👥 Пользователей: `{users_count}`\n"
-        f"🖼️ Генераций: `{gens_count}`\n\n"
-        f"⏳ **Последние 5:**\n"
+    text = (
+        f"👑 **Админ Панель**\n\n"
+        f"📊 **Статистика:**\n"
+        f"👥 Пользователи: `{users_count}`\n"
+        f"🖼️ Генерации: `{gens_count}`"
     )
     
-    for gen in recent_gens:
-        stats_text += f"- `{gen.id}`: `{gen.model}` ({gen.status})\n"
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin:users")],
+        [InlineKeyboardButton(text="❓ Помощь по командам", callback_data="admin:help")],
+        [InlineKeyboardButton(text="🔁 Обновить статистику", callback_data="admin:refresh")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")]
+    ])
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+
+class AdminStates(StatesGroup):
+    waiting_for_user_id = State()
+    waiting_for_balance = State()
+    waiting_for_tariff_duration = State() # Optional, if we want custom
+
+@dp.callback_query(F.data.in_({"admin:users", "admin:help", "admin:refresh", "admin:user_info", "admin:back_main"}))
+async def process_admin_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
         
-    await message.answer(stats_text, parse_mode="Markdown")
+    action = callback.data.split(":")[1]
+    
+    if action == "users":
+        await send_users_list(callback.message)
+        await callback.answer()
+        
+    elif action == "user_info":
+        await callback.message.edit_text(
+            "🔎 **Поиск пользователя**\n\nВведите ID пользователя или Username (без @):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:refresh")]
+            ])
+        )
+        await state.set_state(AdminStates.waiting_for_user_id)
+        await callback.answer()
 
-    help_text = (
-        "🛠 **Admin Commands**\n\n"
-        "👥 `/users` - Список пользователей и статистика\n\n"
-        "🔐 **Управление доступом:**\n"
-        "`/set_access [ID] [level]`\n"
-        "Levels: `full`, `basic`, `demo`, `banned`"
-    )
-    await message.answer(help_text, parse_mode="Markdown")
+    elif action == "help":
+        help_text = (
+            "🛠 **Admin Commands**\n\n"
+            "👥 `/users` - Список пользователей и статистика\n\n"
+            "🔐 **Управление доступом:**\n"
+            "`/set_access [ID] [level]`\n"
+            "Levels: `full`, `basic`, `demo`, `banned`\n\n"
+            "💰 **Финансы:**\n"
+            "`/add_nc [ID] [amount]` - Выдать валюту"
+        )
+        await callback.message.answer(help_text, parse_mode="Markdown")
+        await callback.answer()
+        
+    elif action == "refresh" or action == "back_main":
+        await state.clear()
+        # Refresh the stats message
+        users_count, gens_count, recent_gens = await get_stats()
+        text = (
+            f"👑 **Админ Панель**\n\n"
+            f"📊 **Статистика:**\n"
+            f"👥 Пользователи: `{users_count}`\n"
+            f"🖼️ Генерации: `{gens_count}`"
+        )
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin:users")],
+            [InlineKeyboardButton(text="👤 Инфо о пользователе", callback_data="admin:user_info")],
+            [InlineKeyboardButton(text="❓ Помощь по командам", callback_data="admin:help")],
+            [InlineKeyboardButton(text="🔁 Обновить статистику", callback_data="admin:refresh")],
+            [InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")]
+        ])
+        
+        # If it was a 'back' action, we might need to send a new message if the previous one was deleted or is too far up
+        # But 'edit_text' usually works if we are within the same message flow
+        try:
+            await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        except:
+             # Fallback if we can't edit (e.g. different message type), send new
+            await callback.message.answer(text, parse_mode="Markdown", reply_markup=markup)
+            
+        await callback.answer("Статистика обновлена")
 
-@dp.message(Command("users"))
-async def cmd_users(message: types.Message):
+# Handler for User Search Input
+@dp.message(AdminStates.waiting_for_user_id)
+async def process_admin_user_search(message: types.Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
+        
+    query = message.text.strip()
+    
+    # Try to find user
+    user = None
+    if query.isdigit():
+        user = await get_user(int(query))
+    else:
+        # Search by username logic would go here if implemented in DB
+        # For now, simplistic ID search
+        await message.answer("❌ Пока поддерживается только поиск по ID.")
+        return
 
+    if not user:
+        await message.answer(
+            "❌ Пользователь не найден.\nПопробуйте снова или нажмите 'Отмена'",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="admin:back_main")]
+            ])
+        )
+        return
+        
+    # User found, show Manage Menu
+    await state.clear() # Clear state as we are now in "menu mode" (stateless or callback-driven)
+    await show_user_manage_menu(message, user)
+
+
+async def get_user_manage_content(user: User):
+    # Fetch additional stats
+    stmt = select(func.count(Generation.id)).where(Generation.user_id == user.id)
+    async with async_session() as session:
+        gens_count = (await session.execute(stmt)).scalar() or 0
+        
+        stmt_tokens = select(func.sum(Generation.tokens_used)).where(Generation.user_id == user.id)
+        total_tokens = (await session.execute(stmt_tokens)).scalar() or 0
+
+    tariff_upper = user.tariff.upper()
+    
+    expires_info = "♾️ Бессрочно"
+    if user.tariff_expires_at:
+        expires_info = user.tariff_expires_at.strftime('%Y-%m-%d')
+        
+    text = (
+        f"👤 **Управление пользователем**\n\n"
+        f"🆔 ID: `{user.id}`\n"
+        f"📛 Имя: {user.full_name}\n"
+        f"💳 Тариф: **{tariff_upper}**\n"
+        f"📅 Истекает: `{expires_info}`\n"
+        f"💰 Баланс: `{user.balance} NC`\n"
+        f"📊 Генераций: `{gens_count}`\n"
+        f"🔢 Токены: `{total_tokens}`"
+    )
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏷 Сменить тариф", callback_data=f"admin:manage:tariff:{user.id}")],
+        [InlineKeyboardButton(text="💰 Изменить баланс", callback_data=f"admin:manage:balance:{user.id}")],
+        [InlineKeyboardButton(text="⏱ Срок действия", callback_data=f"admin:manage:duration:{user.id}")],
+        [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="admin:back_main")]
+    ])
+    return text, markup
+
+async def show_user_manage_menu(message: types.Message, user: User):
+    text, markup = await get_user_manage_content(user)
+    await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+
+@dp.callback_query(F.data.startswith("admin:manage:"))
+async def process_admin_manage_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return
+        
+    parts = callback.data.split(":")
+    action = parts[2]
+    target_user_id = int(parts[3])
+    
+    if action == "tariff":
+        # Show tariff list
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⚡ Basic", callback_data=f"admin:set_tariff:{target_user_id}:basic")],
+            [InlineKeyboardButton(text="🔥 Full", callback_data=f"admin:set_tariff:{target_user_id}:full")],
+            [InlineKeyboardButton(text="🍌 Demo", callback_data=f"admin:set_tariff:{target_user_id}:demo")],
+            [InlineKeyboardButton(text="👑 Admin", callback_data=f"admin:set_tariff:{target_user_id}:admin")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin:manage:back:{target_user_id}")]
+        ])
+        await callback.message.edit_text(f"👇 Выберите новый тариф для пользователя `{target_user_id}`:", reply_markup=markup, parse_mode="Markdown")
+        await callback.answer()
+
+    elif action == "duration":
+        # Show duration list
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="1 Месяц", callback_data=f"admin:set_duration:{target_user_id}:1")],
+            [InlineKeyboardButton(text="3 Месяца", callback_data=f"admin:set_duration:{target_user_id}:3")],
+            [InlineKeyboardButton(text="6 Месяцев", callback_data=f"admin:set_duration:{target_user_id}:6")],
+            [InlineKeyboardButton(text="12 Месяцев", callback_data=f"admin:set_duration:{target_user_id}:12")],
+            [InlineKeyboardButton(text="♾️ Бессрочно", callback_data=f"admin:set_duration:{target_user_id}:unlimited")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin:manage:back:{target_user_id}")]
+        ])
+        await callback.message.edit_text(f"⏳ Выберите срок действия для пользователя `{target_user_id}`:", reply_markup=markup, parse_mode="Markdown")
+        await callback.answer()
+
+    elif action == "balance":
+        # Ask for amount
+        await callback.message.edit_text(
+            f"💰 Введите новый баланс для пользователя `{target_user_id}` (целое число NC):", 
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"admin:manage:back:{target_user_id}")]])
+        )
+        await state.set_state(AdminStates.waiting_for_balance)
+        await state.update_data(target_user_id=target_user_id, prompt_message_id=callback.message.message_id)
+        await callback.answer()
+        
+    elif action == "back":
+        # Back to manage menu
+        user = await get_user(target_user_id)
+        if user:
+            await callback.message.delete() # Clean up old menu
+            await show_user_manage_menu(callback.message, user) # Send new one (message object hack)
+        else:
+            await callback.answer("User not found")
+
+async def delete_message_delayed(message: types.Message, delay: int):
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
+    except:
+        pass
+
+@dp.callback_query(F.data.startswith("admin:set_tariff:"))
+async def process_admin_set_tariff(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    user_id = int(parts[2])
+    tariff = parts[3]
+    
+    await set_user_tariff(user_id, tariff)
+    # await callback.answer(f"Тариф изменен на {tariff}") # Toast is easy to miss
+    await callback.answer()
+    
+    # Send temp notification
+    msg = await callback.message.answer(f"✅ Тариф пользователя {user_id} изменен на **{tariff.upper()}**", parse_mode="Markdown")
+    asyncio.create_task(delete_message_delayed(msg, 3))
+    
+    # Return to menu
+    user = await get_user(user_id)
+    await callback.message.delete()
+    await show_user_manage_menu(callback.message, user)
+
+@dp.callback_query(F.data.startswith("admin:set_duration:"))
+async def process_admin_set_duration(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    user_id = int(parts[2])
+    months_str = parts[3]
+    
+    days = None
+    msg_text = "✅ Тариф установлен: **Бессрочно**"
+    
+    if months_str != "unlimited":
+        months = int(months_str)
+        days = months * 30
+        msg_text = f"✅ Срок продлен на **{months} мес.**"
+
+    user = await get_user(user_id)
+    await set_user_tariff(user_id, user.tariff, days=days)
+    
+    await callback.answer()
+    
+    # Temp notification
+    msg = await callback.message.answer(msg_text, parse_mode="Markdown")
+    asyncio.create_task(delete_message_delayed(msg, 3))
+    
+    user = await get_user(user_id) # Refresh
+    await callback.message.delete()
+    await show_user_manage_menu(callback.message, user)
+
+@dp.message(AdminStates.waiting_for_balance)
+async def process_balance_input(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+        
+    # Delete admin input immediately to keep chat clean
+    try:
+        await message.delete()
+    except:
+        pass
+
+    data = await state.get_data()
+    target_user_id = data.get("target_user_id")
+    prompt_message_id = data.get("prompt_message_id")
+    
+    try:
+        amount = int(message.text.strip())
+        
+        user = await get_user(target_user_id)
+        delta = amount - user.balance
+        await update_balance(target_user_id, delta)
+        
+        # Prepare Menu Content (Plain)
+        user = await get_user(target_user_id) # Refresh
+        menu_text, menu_markup = await get_user_manage_content(user)
+        
+        # Temp Success Msg
+        msg = await message.answer(f"✅ Баланс пользователя {target_user_id} установлен на **{amount} NC**.", parse_mode="Markdown")
+        asyncio.create_task(delete_message_delayed(msg, 3))
+        
+        # Try to edit the prompt message back to menu
+        success = False
+        if prompt_message_id:
+            try:
+                await bot.edit_message_text(
+                    text=menu_text,
+                    chat_id=message.chat.id,
+                    message_id=prompt_message_id,
+                    reply_markup=menu_markup,
+                    parse_mode="Markdown"
+                )
+                success = True
+            except Exception as e:
+                pass 
+        
+        if not success:
+            await message.answer(menu_text, parse_mode="Markdown", reply_markup=menu_markup)
+        
+        await state.clear()
+        
+    except ValueError:
+        # Invalid input: Send temp error message
+        msg = await message.answer("❌ Введите корректное число.")
+        asyncio.create_task(delete_message_delayed(msg, 3))
+
+async def send_users_list(message: types.Message):
     stats_list = await get_all_users_stats()
     
     # Format message
@@ -208,7 +471,18 @@ async def cmd_users(message: types.Message):
     if len(text) > 4000:
         text = text[:4000] + "\n... (truncated)"
         
-    await message.answer(text, parse_mode="Markdown")
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Инфо о пользователе", callback_data="admin:user_info")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")]
+    ])
+        
+    await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+
+@dp.message(Command("users"))
+async def cmd_users(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await send_users_list(message)
 
 @dp.message(Command("set_access"))
 async def cmd_set_access(message: types.Message):
@@ -223,8 +497,8 @@ async def cmd_set_access(message: types.Message):
     try:
         user_id = int(args[1])
         level = args[2]
-        if level not in ['full', 'basic', 'demo', 'banned', 'pending']:
-            await message.answer("Invalid level.")
+        if level not in list(TARIFFS.keys()) + ['banned', 'pending']:
+            await message.answer(f"Invalid level. Choose from: {', '.join(TARIFFS.keys())}, banned.")
             return
             
         await update_user_access(user_id, level)
@@ -239,6 +513,189 @@ async def cmd_set_access(message: types.Message):
     except Exception as e:
          await message.answer(f"Error: {e}")
 
+@dp.message(Command("add_nc"))
+async def cmd_add_nc(message: types.Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+        
+    args = message.text.split()
+    if len(args) != 3:
+        await message.answer("Usage: `/add_nc [user_id] [amount]`", parse_mode="Markdown")
+        return
+        
+    try:
+        user_id = int(args[1])
+        amount = int(args[2])
+        
+        new_bal = await update_balance(user_id, amount)
+        await message.answer(f"✅ Balance updated. User {user_id} now has {new_bal} NC.")
+        try:
+             await bot.send_message(user_id, f"💰 **Вам начислено {amount} NC!**\nТекущий баланс: {new_bal} NC", parse_mode="Markdown")
+        except:
+            pass
+    except Exception as e:
+        await message.answer(f"Error: {e}")
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        return
+        
+    tariff_upper = user.tariff.upper()
+    balance = user.balance
+    
+    expires_info = "\n♾️ Бессрочно"
+    if user.tariff_expires_at:
+        expires_info = f"\n📅 Истекает: `{user.tariff_expires_at.strftime('%Y-%m-%d')}`"
+        
+    msg = (
+        f"👤 **Профиль Пилота**\n\n"
+        f"📛 Имя: {user.full_name}\n"
+        f"💳 Тариф: **{tariff_upper}**{expires_info}\n"
+        f"💰 Баланс: **{balance} NC**"
+    )
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Пополнить баланс", callback_data="nav:buy")],
+        [InlineKeyboardButton(text="⬆️ Сменить тариф", callback_data="nav:upgrade")]
+    ])
+    
+    await message.answer(msg, parse_mode="Markdown", reply_markup=markup)
+
+@dp.callback_query(F.data.startswith("nav:"))
+async def process_nav_callback(callback: CallbackQuery):
+    action = callback.data.split(":")[1]
+    
+    # Reuse existing logic by calling the handlers or simulating functionality
+    # But handlers expect Message, not CallbackQuery. We can't direct call cleanly without adapting.
+    # So we adapt.
+    
+    if action == "buy":
+        # Simulate cmd_buy logic
+        markup = InlineKeyboardMarkup(inline_keyboard=[])
+        for key, pkg in PACKAGES.items():
+            btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
+            if pkg['bonus_percent'] > 0:
+                btn_text += f" (+{pkg['bonus_percent']}%)"
+            markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
+        
+        # Add Cancel
+        markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
+        
+        await callback.message.answer("💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:", reply_markup=markup, parse_mode="Markdown")
+        
+    elif action == "upgrade":
+        await cmd_upgrade(callback.message) # cmd_upgrade uses message.answer which is fine on callback.message (it's a Message object)
+    
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_action")
+async def process_cancel_action(callback: CallbackQuery):
+    await callback.message.delete()
+    await callback.answer()
+
+@dp.message(Command("buy"))
+@dp.message(F.text == "💰 Пополнение")
+async def cmd_buy(message: types.Message):
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for key, pkg in PACKAGES.items():
+        btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
+        if pkg['bonus_percent'] > 0:
+            btn_text += f" (+{pkg['bonus_percent']}%)"
+        markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
+        
+    # Add Cancel
+    markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
+        
+    # Add fake payment logic handler
+    await message.answer("💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:", reply_markup=markup, parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("buy:"))
+async def process_buy_callback(callback: CallbackQuery):
+    pkg_key = callback.data.split(":")[1]
+    pkg = PACKAGES.get(pkg_key)
+    
+    if not pkg:
+        await callback.answer("Ошибка пакета")
+        return
+        
+    # MOCK PAYMENT
+    user_id = callback.from_user.id
+    new_bal = await update_balance(user_id, pkg['nc'])
+    
+    await callback.message.edit_text(
+        f"🎉 **Успешная покупка!**\n\n"
+        f"Вы приобрели пакет **{pkg['name']}**.\n"
+        f"Начислено: `{pkg['nc']} NC`.\n"
+        f"Баланс: `{new_bal} NC`.",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.message(Command("upgrade"))
+@dp.message(F.text == "⬆️ Тарифы")
+async def cmd_upgrade(message: types.Message):
+    # Show tariffs
+    text = (
+        "🚀 **Тарифные планы**\n\n"
+        "1️⃣ **ДЕМО (Бесплатно)**\n"
+        "• 500 NC при старте\n"
+        "• Только квадрат 1:1\n"
+        "• Без референсов\n"
+        "• Модели: Imagen 4 Fast, Flash, Pro (Preview)\n\n"
+        "2️⃣ **БАЗОВЫЙ (390₽ / мес)**\n"
+        "• +3000 NC ежемесячно\n"
+        "• Любые соотношения сторон\n"
+        "• 1 референс\n"
+        "• Все модели (Pro без 4K)\n\n"
+        "3️⃣ **ПОЛНЫЙ (990₽ / мес)**\n"
+        "• +8000 NC ежемесячно\n"
+        "• 5 референсов\n"
+        "• 4K разрешение\n"
+        "• Полный доступ ко всему"
+    )
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Купить БАЗОВЫЙ (390₽)", callback_data="buy_tariff:basic")],
+        [InlineKeyboardButton(text="🔥 Купить ПОЛНЫЙ (990₽)", callback_data="buy_tariff:full")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="cancel_action")]
+    ])
+    
+    await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+
+@dp.message(Command("buy_tariff"))
+async def cmd_buy_tariff_command(message: types.Message):
+    # Backward compatibility or manual use
+    args = message.text.split()
+    if len(args) != 2:
+        return
+    tariff = args[1].lower()
+    await process_tariff_purchase(message.chat.id, tariff, message)
+
+@dp.callback_query(F.data.startswith("buy_tariff:"))
+async def process_buy_tariff_callback(callback: CallbackQuery):
+    tariff = callback.data.split(":")[1]
+    await process_tariff_purchase(callback.message.chat.id, tariff, callback.message)
+    await callback.answer()
+
+async def process_tariff_purchase(user_id: int, tariff: str, message: types.Message):
+    if tariff not in ['basic', 'full']:
+        return
+        
+    # Mock Tariff Purchase
+    rules = TARIFFS[tariff]
+    
+    await set_user_tariff(user_id, tariff)
+    await update_balance(user_id, rules['monthly_nc']) # Give monthly NC
+    
+    await message.answer(
+        f"🎉 **Тариф {tariff.upper()} активирован!**\n"
+        f"Вам начислено {rules['monthly_nc']} NC.\n"
+        f"Спасибо за поддержку! 🍌",
+        parse_mode="Markdown"
+    )
+
 # FSM States
 class GenStates(StatesGroup):
     waiting_for_prompt = State()
@@ -252,11 +709,23 @@ def get_main_menu(level: str = "demo"):
     return types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="🍌 Открыть приложение", web_app=WebAppInfo(url=url))],
-            [types.KeyboardButton(text="⚡ Flash"), types.KeyboardButton(text="🍌 Pro")],
-            [types.KeyboardButton(text="📸 Imagen"), types.KeyboardButton(text="❓ Помощь")]
+            [types.KeyboardButton(text="🎨 К созданию")],
+            [types.KeyboardButton(text="👤 Мой кабинет"), types.KeyboardButton(text="⬆️ Тарифы")],
+            [types.KeyboardButton(text="❓ Помощь")]
         ],
         resize_keyboard=True,
-        input_field_placeholder="Выберите режим или откройте приложение"
+        input_field_placeholder="Выберите действие"
+    )
+
+def get_creation_menu():
+    return types.ReplyKeyboardMarkup(
+        keyboard=[
+            [types.KeyboardButton(text="⚡ Flash"), types.KeyboardButton(text="🍌 Pro")],
+            [types.KeyboardButton(text="📸 Imagen")],
+            [types.KeyboardButton(text="🔙 Назад")]
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите модель"
     )
 
 def get_cancel_menu():
@@ -278,13 +747,30 @@ def get_dialogue_menu():
 
 # --- Command Handlers ---
 
+@dp.message(F.text == "🔙 Назад")
+async def cmd_back(message: types.Message, state: FSMContext):
+    # Retrieve user for main menu access level
+    user = await get_user(message.chat.id)
+    level = user.tariff if user else 'demo'
+    await message.answer("🏠 Главное меню", reply_markup=get_main_menu(level))
+
+@dp.message(F.text == "🎨 К созданию")
+async def cmd_creation_menu(message: types.Message):
+    await message.answer("🎨 Выберите нейросеть для генерации:", reply_markup=get_creation_menu())
+
+@dp.message(F.text == "👤 Мой кабинет")
+async def cmd_my_cabinet(message: types.Message):
+    await cmd_profile(message)
+
+# Existing handlers...
+
 @dp.message(Command("cancel"))
 @dp.message(F.text.lower() == "отмена")
 @dp.message(F.text.lower() == "cancel")
 @dp.message(F.text == "✅ Завершить диалог")
 async def cmd_cancel(message: types.Message, state: FSMContext):
     user = await get_user(message.from_user.id)
-    level = user.access_level if user else 'demo'
+    level = user.tariff if user else 'demo'
 
     # Cleanup session
     if message.chat.id in chat_sessions:
@@ -320,7 +806,7 @@ async def handle_web_app_data(message: types.Message, state: FSMContext):
     if data.get('action') == 'generate':
         # Validate Resolution for Basic/Demo
         user = await get_user(message.chat.id)
-        level = user.access_level if user else 'demo'
+        level = user.tariff if user else 'demo'
         _, can_high_res = get_user_limits(level)
         
         target_res = data.get('resolution', '1024x1024')
@@ -442,9 +928,11 @@ async def cmd_imagen(message: types.Message, state: FSMContext):
 async def trigger_generation(message: types.Message, state: FSMContext):
     # 0. Context & Access
     user = await get_user(message.chat.id)
-    level = user.access_level if user else 'demo'
-    max_refs, can_high_res = get_user_limits(level)
-
+    # Fallback if no user (shouldn't happen)
+    if not user:
+        return
+        
+    tariff = user.tariff
     data = await state.get_data()
     prompt = data.get('prompt', '').strip()
     model = data.get('model')
@@ -455,46 +943,64 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         await message.answer("⚠️ Эмм... А рисовать-то что? Напишите хоть пару слов.", reply_markup=get_cancel_menu())
         return # Keep state
 
-    # 2. Ref limits
-    if len(refs) > max_refs:
-        refs = refs[:max_refs]
-        await message.answer(f"✂️ Лимит фото для {level}: {max_refs}. Лишние убрал.")
-
-    # 3. Parse AR (Robust)
+    # 3. Parse AR & Res (Pre-validation logic to get final params)
     import re
     ar = data.get('aspect_ratio', '1:1')
-    target_res = data.get('resolution', '1K')
+    target_res = data.get('resolution', '1024x1024')
     
     # Regex for various dashes: -, --, —, –
-    # Matches: (dash)ar (space) (value)
     match_ar = re.search(r'(?:--|—|–|-)ar\s+(\d+:\d+)', prompt)
     if match_ar:
         ar = match_ar.group(1)
-        # Remove the flag from prompt
         prompt = re.sub(r'(?:--|—|–|-)ar\s+\d+:\d+', '', prompt).strip()
 
-    # Regex for resolution: --1k, --2k, --4k
+    # Regex for resolution
     match_res = re.search(r'(?:--|—|–|-)(1k|2k|4k)', prompt, re.IGNORECASE)
     if match_res:
         requested_res = match_res.group(1).upper()
-        # Remove flag
         prompt = re.sub(r'(?:--|—|–|-)(1k|2k|4k)', '', prompt, flags=re.IGNORECASE).strip()
-        
-        # Check permission
-        if requested_res in ['2K', '4K']:
-            if can_high_res:
-                target_res = requested_res
-            else:
-                await message.answer(f"⚠️ Разрешение {requested_res} доступно только Full/Admin. Использую 1K.")
-                target_res = '1K'
+        target_res = requested_res
+    
+    # --- PRICING & LIMITS CHECK ---
+    
+    # Check Limits
+    is_valid, reason = validate_request(tariff, model, target_res, len(refs), ar)
+    if not is_valid:
+        # If invalid, check if we can suggest upgrade
+        if "доступна с тарифа БАЗОВЫЙ" in reason:
+             msg = f"{reason}\n💡 Апгрейд: `/upgrade`"
+        elif "только на тарифе ПОЛНЫЙ" in reason:
+             msg = f"{reason}\n💡 Апгрейд: `/upgrade`"
         else:
-             target_res = '1K'
+             msg = reason
+        await message.answer(msg, parse_mode="Markdown")
+        # Do NOT clear state, let them adjust? Or clear? 
+        # Better let them adjust or cancel.
+        return 
+
+    # Calculate Cost
+    cost = calculate_cost(model, target_res)
+    
+    # Check Balance
+    if user.balance < cost:
+        await message.answer(
+            f"📉 **Недостаточно средств!**\n"
+            f"Стоимость: `{cost} NC`\n"
+            f"Ваш баланс: `{user.balance} NC`\n\n"
+            f"Пополнить: `/buy`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Deduct Balance
+    new_balance = await update_balance(user.id, -cost)
 
     # 4. Status Message
     from aiogram.utils.markdown import hide_link
     ref_info = f"\n📎 Refs: {len(refs)}" if refs else ""
     status_text = (
         f"🍌 **Генерирую...** (`{model}`)\n"
+        f"💰 Списано: `{cost} NC` (Остаток: `{new_balance}`)\n"
         f"📝 `{prompt[:50] + '...' if len(prompt)>50 else prompt}`\n"
         f"📐 AR: `{ar}`"
         f"{ref_info}"
@@ -503,7 +1009,7 @@ async def trigger_generation(message: types.Message, state: FSMContext):
     processing_msg = await message.answer(status_text, parse_mode="Markdown")
     
     # Log
-    gen_id = await log_generation(message.chat.id, model, prompt, ar, None, 'pending')
+    gen_id = await log_generation(message.chat.id, model, prompt, ar, target_res, 'pending')
 
     # Helpers for caption
     def get_token_suffix(count: int) -> str:
@@ -557,15 +1063,18 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         model_display = MODEL_NAMES.get(model, model)
         token_text = f"Использовано {token_count} {get_token_suffix(token_count)}"
         
-        final_caption = f"✨ Готово! {model_display}\n{token_text}\n\n🍌 @dimastro_banana_bot"
+        final_caption = (
+            f"✨ Готово! {model_display}\n"
+            f"💸 {cost} NC | 💼 {new_balance} NC\n"
+            f"{token_text}\n\n"
+            f"🍌 @dimastro_banana_bot"
+        )
 
         # Logic for Dialogue continuation
-        user = await get_user(message.chat.id)
-        level = user.access_level if user else 'demo'
+        # Re-fetch user to get latest state if needed
+        keyboard = get_main_menu(tariff)
         
-        keyboard = get_main_menu(level)
-        
-        if (level == 'admin' or level == 'full') and model == 'nano_banana_pro':
+        if (tariff == 'full' or user.access_level=='admin') and model == 'nano_banana_pro':
              final_caption += "\n\n💬 **Редактирование:** Напишите, что изменить (или нажмите кнопку)."
              await state.set_state(GenStates.dialogue)
              keyboard = get_dialogue_menu()
@@ -591,8 +1100,15 @@ async def trigger_generation(message: types.Message, state: FSMContext):
             pass
 
     except Exception as e:
+        # REFUND
+        refund_bal = await update_balance(user.id, cost)
         await update_generation_status(gen_id, 'failed')
-        await message.answer(f"❌ Упс! Ошибка: {e}", reply_markup=get_main_menu(level))
+        
+        await message.answer(
+            f"❌ Упс! Ошибка генерации: {e}\n"
+            f"💰 **Средства возвращены.** Баланс: {refund_bal} NC", 
+            reply_markup=get_main_menu(tariff)
+        )
         if message.chat.id in chat_sessions:
             del chat_sessions[message.chat.id]
     
