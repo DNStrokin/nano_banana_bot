@@ -1497,12 +1497,20 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
     
     # Prompt Instructions
     text += "✏️ **Введите промпт:**\nПросто напишите, что хотите увидеть.\n"
-    
-    # Ref instructions
-    if supports_refs:
+
+    # Build markup
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+
+    # AR Row (Aspect Ratio)
+    ar_row = []
+    ar_options = ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"]
+    for ratio in ar_options:
+        label = ratio
+        if ratio == ar:
+            label = f"✅ {ratio}"
         ar_row.append(InlineKeyboardButton(text=label, callback_data=f"create:config:ar:{ratio}"))
     markup.inline_keyboard.append(ar_row)
-    
+
     # Res Row (Only if supported)
     if supports_res:
         res_row = []
