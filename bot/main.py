@@ -621,18 +621,21 @@ async def process_buy_callback(callback: CallbackQuery):
         await callback.answer("Ошибка пакета")
         return
         
-    # MOCK PAYMENT
-    user_id = callback.from_user.id
-    new_bal = await update_balance(user_id, pkg['nc'])
+    # MOCK PAYMENT - DISABLED TEMPORARILY
+    # user_id = callback.from_user.id
+    # new_bal = await update_balance(user_id, pkg['nc'])
     
-    await callback.message.edit_text(
-        f"🎉 **Успешная покупка!**\n\n"
-        f"Вы приобрели пакет **{pkg['name']}**.\n"
-        f"Начислено: `{pkg['nc']} NC`.\n"
-        f"Баланс: `{new_bal} NC`.",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
+    await callback.answer("🚧 Оплата временно недоступна. Свяжитесь с админом.", show_alert=True)
+    return
+
+    # await callback.message.edit_text(
+    #     f"🎉 **Успешная покупка!**\n\n"
+    #     f"Вы приобрели пакет **{pkg['name']}**.\n"
+    #     f"Начислено: `{pkg['nc']} NC`.\n"
+    #     f"Баланс: `{new_bal} NC`.",
+    #     parse_mode="Markdown"
+    # )
+    # await callback.answer()
 
 @dp.message(Command("upgrade"))
 @dp.message(F.text == "⬆️ Тарифы")
@@ -676,36 +679,32 @@ async def cmd_buy_tariff_command(message: types.Message):
 
 @dp.callback_query(F.data.startswith("buy_tariff:"))
 async def process_buy_tariff_callback(callback: CallbackQuery):
-    tariff = callback.data.split(":")[1]
-    await process_tariff_purchase(callback.message.chat.id, tariff, callback.message)
-    await callback.answer()
+    # STUB
+    await callback.answer("🚧 Смена тарифа временно недоступна. Пишите админу @dimastro.", show_alert=True)
+    return
+    
+    # tariff = callback.data.split(":")[1]
+    # await process_tariff_purchase(callback.message.chat.id, tariff, callback.message)
+    # await callback.answer()
 
 async def process_tariff_purchase(user_id: int, tariff: str, message: types.Message):
     if tariff not in ['basic', 'full']:
         return
         
+    # STUB - Block all purchase avenues
+    await message.answer("🚧 Смена тарифа временно недоступна. Пишите админу @dimastro.", parse_mode="Markdown")
+    return
+
     # Mock Tariff Purchase
-    rules = TARIFFS[tariff]
-    
-    await set_user_tariff(user_id, tariff)
-    await update_balance(user_id, rules['monthly_nc']) # Give monthly NC
-    
-    await message.answer(
-        f"🎉 **Тариф {tariff.upper()} активирован!**\n"
-        f"Вам начислено {rules['monthly_nc']} NC.\n"
-        f"Спасибо за поддержку! 🍌",
-        parse_mode="Markdown"
-    )
-
-# FSM States
-class GenStates(StatesGroup):
-    waiting_for_prompt = State()
-    waiting_for_reference = State() # Keep for Web App compatibility if needed
-    dialogue = State()
-
-# --- Keyboards ---
-
-def get_main_menu(level: str = "demo"):
+    # rules = TARIFFS[tariff]
+    # 
+    # await set_user_tariff(user_id, tariff)
+    # await update_balance(user_id, rules['monthly_nc']) # Give monthly NC
+    # 
+    # await message.answer(
+    #     f"🎉 **Тариф {tariff.upper()} активирован!**\n"
+    #     f"Вам начислено {rules['monthly_nc']} NC.\n"
+    #     f"Спасибо за поддержку! 🍌",
     url = f"https://DNStrokin.github.io/nano_banana_bot/?level={level}"
     return types.ReplyKeyboardMarkup(
         keyboard=[
@@ -1024,6 +1023,12 @@ async def trigger_generation(message: types.Message, state: FSMContext):
     try:
         # Download refs
         image_bytes_list = []
+        
+        # Add Dialogue Ref if exists
+        dialogue_ref = data.get('dialogue_ref_file_id')
+        if dialogue_ref and dialogue_ref not in refs:
+             refs.append(dialogue_ref)
+
         if refs:
             bot_instance = message.bot
             for file_id in refs:
@@ -1034,8 +1039,9 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         # Call API
         # Retrieve existing chat session if in dialogue mode
         chat_session = None
-        current_state = await state.get_state()
-        if current_state == GenStates.dialogue:
+        is_continuation = data.get('is_dialogue_continuation', False)
+        
+        if is_continuation:
              chat_session = chat_sessions.get(message.chat.id)
 
         image_bytes, token_count, new_chat_session = await nano_service.generate_image(
@@ -1088,12 +1094,10 @@ async def trigger_generation(message: types.Message, state: FSMContext):
             ]
         ])
         
-        if (tariff == 'full' or user.access_level=='admin') and model == 'nano_banana_pro':
-             final_caption += "\n\n💬 *Редактирование:* Напишите, что изменить (или нажмите кнопку)."
-             await state.set_state(GenStates.dialogue)
+        if (tariff == 'full' or user.access_level=='admin' or tariff == 'basic') and model == 'nano_banana_pro':
+             final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
+             await state.set_state(GenStates.dialogue_standby)
              reply_keyboard = get_dialogue_menu()
-             # Keep inline buttons? Maybe not, dialogue assumes text interaction. 
-             # But "Create Again" is useful. Let's keep them attached to the image.
         else:
              await state.clear()
              # Clear session if not continuing
@@ -1103,41 +1107,16 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         # Send Result
         photo = BufferedInputFile(image_bytes, filename=f"banana_{model}.png")
         await message.answer_photo(
-            photo, 
-            caption=final_caption,
-            reply_markup=result_inline, # Inline goes to photo
-            parse_mode="Markdown"
+             photo,
+             caption=final_caption,
+             reply_markup=result_inline,
+             parse_mode="Markdown"
         )
-        # Send Reply Keyboard separately if needed? No, answer_photo takes reply_markup.
-        # WAIT. answer_photo can accept Inline OR Reply. But not both in same message object.
-        # Actually in Telegram Bot API: reply_markup can be InlineKeyboardMarkup or ReplyKeyboardMarkup.
-        # But we want BOTH: Inline buttons under image, AND Reply buttons at bottom.
-        # This is NOT possible in one message.
-        # We must send Reply Keyboard in a separate message or ensure it's persistent.
-        # Since we are sending a Photo, we should attach Inline buttons to it.
-        # And if we want to change Reply Keyboard, we usually send a specific text message "Menu updated" or just rely on previous state.
-        # But user wants "Minimal buttons... when navigating".
-        # If I send a photo with Inline, the old Reply Keyboard persists unless I send a new message with new Reply Keyboard.
-        # I can send a "status" message that deletes itself? Or just update it via `processing_msg` deletion?
-        # Actually, `processing_msg` was `await message.answer(...)`. I can edit THAT to show "Done" and update Reply Keyboard? 
-        # But `processing_msg` is text. I want Photo.
-        
-        # Strategy:
-        # 1. Send Photo with Inline Buttons.
-        # 2. To update Reply Keyboard, I might need to send a dummy message or just accept current state?
-        # User said: "Оставим только кнопку 'Вернуться в главное меню'".
-        # I updates show_config_menu to possibly *not* update reply keyboard (it edits inline).
-        # But trigger_generation starts from `message` (user prompt).
-        # I should probably send a text message with the Reply Keyboard if it's not set.
-        # OR: `processing_msg` (which says "Generating...") usually has the current keyboard.
-        # I cannot update keyboard without sending a message (except editing an existing text message).
-        # If I delete `processing_msg`, keyboard persists.
-        # If I want to FORCE clear/set keyboard, I must send a message.
-        # Maybe: `await message.answer("✅", reply_markup=get_minimal_menu())` then delete it? No, keyboard persists only if message exists? No, persistent.
-        # Actually, best practice: Send Photo. Then (or before) send a text "Here is your image" with ReplyMarkup? No, cluttered.
-        # I'll stick to: Send Photo handling Inline. 
-        # And I'll rely on the fact that `cmd_creation_entry` or `show_config_menu` *should* have set the Minimal Keyboard.
-        # I will update `cmd_creation_entry` to set Minimal Keyboard.
+
+        # Send reply keyboard separately (answer_photo only supports inline keyboards)
+        await message.answer("Выберите действие:", reply_markup=reply_keyboard)
+
+
         
         # Cleanup
         try:
@@ -1168,6 +1147,13 @@ async def trigger_generation(message: types.Message, state: FSMContext):
     
 # In-memory session storage (simple approach for single instance bot)
 chat_sessions = {}
+
+class GenStates(StatesGroup):
+    waiting_for_prompt = State()
+    dialogue = State()
+    dialogue_standby = State()
+    dialogue_confirm = State()
+
 processing_tasks = {}
 
 @dp.message(GenStates.dialogue)
@@ -1273,7 +1259,96 @@ async def show_creation_start(message: types.Message, user: User, is_edit=False)
     else:
         await message.answer(text, parse_mode="Markdown", reply_markup=markup)
 
+
+@dp.message(GenStates.dialogue_standby)
+async def process_dialogue_standby(message: types.Message, state: FSMContext):
+    # 1. Capture Input
+    prompt = message.text or message.caption
+    ref_image = None
+    
+    if message.photo:
+         ref_image = message.photo[-1] # ID
+         if not prompt:
+             prompt = "" # Allow empty prompt if image? Usually need prompt.
+             
+    if not prompt and not ref_image:
+        await message.answer("⚠️ Пришлите текст или фото для продолжения диалога.")
+        return
+
+    # Check Navigation/Cancel commands explicitly
+    if prompt and (prompt == "🏠 Главное меню" or prompt == "✅ Завершить диалог" or prompt.lower() in ["/start", "cancel", "отмена"]):
+         await cmd_cancel(message, state) # Handled by cancel
+         return
+
+    # 2. Check Tariff
+    user = await get_user(message.from_user.id)
+    # Rules: Demo - No dialogue? Basic/Full - Yes.
+    if user.tariff == 'demo':
+         await message.answer(
+             "🔒 **Диалог доступен только на тарифах Basic и Full.**\n"
+             "Перейдите на новый уровень, чтобы уточнять генерации!",
+             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Тарифы", callback_data="nav:upgrade")]])
+         )
+         return
+
+    # 3. Save Context
+    # We need to pass this input to generation later.
+    # Update prompt in state? Or "dialogue_prompt".
+    # trigger_generation reads 'prompt'. 
+    await state.update_data(prompt=prompt)
+    if ref_image:
+         # Download logic? trigger_generation expects "ref_images" as bytes list in state?
+         # Or we handle it here. 
+         # Let's defer downloading to trigger_generation to keep logic central. 
+         # Store file_id in "dialogue_ref_file_id"
+         await state.update_data(dialogue_ref_file_id=ref_image.file_id)
+
+    # 4. Confirm Deduction
+    cost = MODEL_PRICES.get('nano_banana_pro', 0)
+    
+    msg = (
+        f"💬 **Продолжение диалога**\n"
+        f"Будет списано: **{cost} NC**.\n"
+        f"Продолжить?"
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=f"✅ Продолжить ({cost} NC)", callback_data="dialogue:continue"),
+            InlineKeyboardButton(text="❌ Завершить", callback_data="dialogue:finish")
+        ]
+    ])
+    await message.answer(msg, reply_markup=markup, parse_mode="Markdown")
+    await state.set_state(GenStates.dialogue_confirm)
+
+@dp.callback_query(F.data.startswith("dialogue:"))
+async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMContext):
+    action = callback.data.split(":")[1]
+    
+    if action == "finish":
+        await callback.message.delete()
+        await state.clear()
+        user = await get_user(callback.from_user.id)
+        await callback.message.answer("✅ Диалог завершен.", reply_markup=get_main_menu(user.tariff))
+        await callback.answer()
+        return
+        
+    elif action == "continue":
+        await callback.message.delete() # Delete confirm prompt
+        await callback.message.answer("⏳ Генерирую ответ...")
+        # Trigger Generation
+        # We need to signal that this is a dialogue continuation.
+        # trigger_generation uses state. If we updated 'prompt', it should use it.
+        # But we need to ensure it uses the EXISTING session.
+        # We will add a flag in state? 'is_dialogue_continuation' = True
+        await state.update_data(is_dialogue_continuation=True)
+        
+        # Call trigger logic. trigger_generation takes (message, state).
+        # We pass callback.message (which handles answer/reply).
+        await trigger_generation(callback.message, state)
+        await callback.answer()
+
 @dp.message(F.text == "🎨 К созданию")
+
 async def cmd_creation_entry(message: types.Message, state: FSMContext):
     user = await get_user(message.from_user.id)
     # Update Reply Keyboard (Minimal)
@@ -1380,7 +1455,10 @@ async def process_create_callback(callback: CallbackQuery, state: FSMContext):
 
     elif action == "back":
         if value == "start":
-             await show_creation_start(callback.message, user, is_edit=True)
+             # If message is photo (result), cannot edit_text -> send new
+             # If text (menu), edit it
+             can_edit = (callback.message.content_type == "text")
+             await show_creation_start(callback.message, user, is_edit=can_edit)
     
     await callback.answer()
 
@@ -1422,23 +1500,6 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
     
     # Ref instructions
     if supports_refs:
-         user_tariff_rules = TARIFFS.get(user.tariff, TARIFFS['demo'])
-         max_refs = user_tariff_rules.get('max_refs', 0)
-         
-         if max_refs > 0:
-             text += f"\n📸 Можно прикрепить до **{max_refs}** фото-референсов."
-         else:
-             text += (
-                 "\n⚠️ Референсы (фото) недоступны на вашем тарифе.\n"
-                 "✨ /upgrade — разблокировать загрузку фото."
-             )
-    
-    markup = InlineKeyboardMarkup(inline_keyboard=[])
-    
-    # AR Row
-    ar_row = []
-    for ratio in ASPECT_RATIOS:
-        label = f"✅ {ratio}" if ratio == ar else ratio
         ar_row.append(InlineKeyboardButton(text=label, callback_data=f"create:config:ar:{ratio}"))
     markup.inline_keyboard.append(ar_row)
     
@@ -1481,6 +1542,14 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
         
     # Save ID for later deletion
     await state.update_data(config_message_id=msg_id)
+
+def get_main_menu(tariff: str):
+    kb = [
+        [KeyboardButton(text="🎨 К созданию")],
+        [KeyboardButton(text="👤 Мой кабинет"), KeyboardButton(text="💎 Тарифы")],
+        [KeyboardButton(text="❓ Помощь")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def get_minimal_menu():
     """Returns a minimal reply keyboard with just 'Main Menu'."""
