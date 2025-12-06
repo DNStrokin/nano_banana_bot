@@ -1354,9 +1354,13 @@ async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMC
         await state.clear()
         if callback.message.chat.id in chat_sessions:
             del chat_sessions[callback.message.chat.id]
-        # Temp notification with minimal menu
-        finish_msg = await callback.message.answer("✅ Диалог завершен.", reply_markup=get_minimal_menu())
+        # Temp notification
+        finish_msg = await callback.message.answer("✅ Диалог завершен.")
         asyncio.create_task(delete_message_delayed(finish_msg, 3))
+        # Постоянное сообщение с минимальным меню, чтобы кнопка Главного меню не пропадала
+        user = await get_user(callback.from_user.id)
+        level = user.tariff if user else 'demo'
+        await callback.message.answer("🏠 Главное меню", reply_markup=get_minimal_menu())
         # Try delete the inline control message to убрать лишнее
         try:
             await callback.message.delete()
