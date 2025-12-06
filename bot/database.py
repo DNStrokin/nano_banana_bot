@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import BigInteger, Integer, Text, DateTime, func, select, update
 from config import config
+from pricing import START_BONUS
 import logging
 
 DATABASE_URL = f"postgresql+asyncpg://{config.POSTGRES_USER}:{config.POSTGRES_PASSWORD}@{config.POSTGRES_HOST}/{config.POSTGRES_DB}"
@@ -21,7 +22,7 @@ class User(Base):
     access_level: Mapped[str] = mapped_column(Text, default='pending') # pending, demo, basic, full, banned, admin
     
     # New Fields for Subscription System
-    balance: Mapped[int] = mapped_column(BigInteger, default=500) # Default to 500 NC (Demo bonus)
+    balance: Mapped[int] = mapped_column(BigInteger, default=START_BONUS) # Default Demo bonus
     tariff: Mapped[str] = mapped_column(Text, default='demo') # demo, basic, full
     tariff_expires_at: Mapped[DateTime | None] = mapped_column(DateTime, nullable=True)
     
@@ -67,14 +68,14 @@ async def add_or_update_user(user_id: int, username: str, full_name: str):
         user = result.scalar_one_or_none()
         
         if not user:
-            # New users get Demo tariff + 500 NC by default from model schema, but let's be explicit
+            # New users get Demo tariff + start bonus NC
             user = User(
                 id=user_id, 
                 username=username, 
                 full_name=full_name, 
                 access_level='demo', # No more pending
                 tariff='demo',
-                balance=500
+                balance=START_BONUS
             )
             session.add(user)
             await session.commit()

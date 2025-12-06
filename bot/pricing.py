@@ -1,6 +1,9 @@
 
 # Tariff & Pricing Configuration
 
+# Start bonus for new users (in NC)
+START_BONUS = 1000
+
 # Currency Logic: 1 RUB = 10 NC
 RUB_TO_NC = 10
 
@@ -36,7 +39,7 @@ TARIFFS = {
     "demo": {
         "price_rub": 0,
         "monthly_nc": 0,
-        "initial_nc": 500,
+        "initial_nc": START_BONUS,
         "allowed_models": [
             "imagen-4.0-fast-generate-001",
             "gemini-2.5-flash-image",
