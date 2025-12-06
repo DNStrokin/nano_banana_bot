@@ -94,7 +94,7 @@ async def cmd_start(message: types.Message):
             f"Ваш тариф: **ДЕМО**.\n\n"
             f"Используйте /profile чтобы проверить баланс.\n"
             f"Нажмите кнопку ниже, чтобы начать рисовать!",
-            reply_markup=get_main_menu(user.tariff),
+            reply_markup=get_main_menu(user.tariff, user.balance),
             parse_mode="Markdown"
         )
         await notify_admins_request(user)
@@ -103,7 +103,7 @@ async def cmd_start(message: types.Message):
             f"С возвращением, {message.from_user.full_name}! 🍌\n"
             f"Ваш тариф: **{user.tariff.upper()}**.\n"
             f"Нажми кнопку ниже, чтобы открыть генератор.",
-            reply_markup=get_main_menu(user.tariff),
+            reply_markup=get_main_menu(user.tariff, user.balance),
             parse_mode="Markdown"
         )
 
@@ -743,7 +743,8 @@ async def cmd_back(message: types.Message, state: FSMContext):
     # Retrieve user for main menu access level
     user = await get_user(message.chat.id)
     level = user.tariff if user else 'demo'
-    await message.answer("🏠 Главное меню", reply_markup=get_main_menu(level))
+    balance = user.balance if user else None
+    await message.answer("🏠 Главное меню", reply_markup=get_main_menu(level, balance))
 
 
 
@@ -756,6 +757,7 @@ async def cmd_back(message: types.Message, state: FSMContext):
 async def cmd_cancel(message: types.Message, state: FSMContext):
     user = await get_user(message.from_user.id)
     level = user.tariff if user else 'demo'
+    balance = user.balance if user else None
 
     # Cleanup session
     if message.chat.id in chat_sessions:
@@ -763,11 +765,11 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
 
     current_state = await state.get_state()
     if current_state is None:
-        await message.answer("А нечего отменять. Мы на старте.", reply_markup=get_main_menu(level))
+        await message.answer("А нечего отменять. Мы на старте.", reply_markup=get_main_menu(level, balance))
         return
 
     await state.clear()
-    await message.answer("🚫 Операция отменена. Возвращаемся в главное меню.", reply_markup=get_main_menu(level))
+    await message.answer("🚫 Операция отменена. Возвращаемся в главное меню.", reply_markup=get_main_menu(level, balance))
 
 @dp.message(F.web_app_data)
 async def handle_web_app_data(message: types.Message, state: FSMContext):
@@ -827,11 +829,12 @@ async def start_generation_flow(message: types.Message, state: FSMContext, model
     # Access Check
     if not await check_access(message.chat.id, model):
         user = await get_user(message.chat.id)
-        level = user.access_level if user else 'demo'
+        level = user.tariff if user else 'demo'
+        balance = user.balance if user else None
         await message.answer(
             f"⛔ Псс, парень! Модель `{model}` тебе недоступна.\n"
             "Постучись админу (или /start для запроса).", 
-            reply_markup=get_main_menu(level),
+            reply_markup=get_main_menu(level, balance),
             parse_mode="Markdown"
         )
         return
@@ -882,7 +885,8 @@ async def start_generation_flow(message: types.Message, state: FSMContext, model
 @dp.message(F.text == "❓ Помощь")
 async def cmd_help(message: types.Message):
     user = await get_user(message.chat.id)
-    level = user.access_level if user else 'demo'
+    level = user.tariff if user else 'demo'
+    balance = user.balance if user else None
     
     help_text = (
         "📚 **Справка**\n\n"
@@ -891,7 +895,7 @@ async def cmd_help(message: types.Message):
         "📸 **Imagen**: Только для реалистичных фото.\n\n"
         "🎨 **WebApp**: Нажмите 'Открыть приложение', чтобы настроить всё визуально!"
     )
-    await message.answer(help_text, parse_mode="Markdown", reply_markup=get_main_menu(level))
+    await message.answer(help_text, parse_mode="Markdown", reply_markup=get_main_menu(level, balance))
 
 @dp.message(Command("pro"))
 @dp.message(F.text == "🍌 Pro")
@@ -1132,6 +1136,9 @@ async def trigger_generation(message: types.Message, state: FSMContext):
             dlg_msg = await message.answer("💬 Режим диалога", reply_markup=reply_keyboard)
             # Сохраняем ID сообщения с индикатором диалога, чтобы можно было удалить при завершении
             await state.update_data(dialogue_indicator_msg_id=dlg_msg.message_id, actions_msg_id=actions_msg.message_id)
+        else:
+            # Для моделей без диалога тоже показываем минимальную клавиатуру (Главное меню)
+            await message.answer("🏠 Главное меню", reply_markup=reply_keyboard)
 
 
         
@@ -1157,7 +1164,7 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         await message.answer(
             f"❌ Упс! Ошибка генерации: {e}\n"
             f"💰 **Средства возвращены.** Баланс: {refund_bal} NC", 
-            reply_markup=get_main_menu(tariff)
+            reply_markup=get_main_menu(tariff, refund_bal)
         )
         if message.chat.id in chat_sessions:
             del chat_sessions[message.chat.id]
@@ -1673,10 +1680,16 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
     # Save ID for later deletion
     await state.update_data(config_message_id=msg_id)
 
-def get_main_menu(tariff: str):
+def get_main_menu(tariff: str, balance: int | None = None):
+    profile_label = "👤 Мой кабинет"
+    if balance is not None:
+        profile_label += f" ({balance} NC)"
+    tariff_label = "💎 Тарифы"
+    if tariff:
+        tariff_label += f" ({tariff.upper()})"
     kb = [
         [KeyboardButton(text="🎨 К созданию")],
-        [KeyboardButton(text="👤 Мой кабинет"), KeyboardButton(text="💎 Тарифы")],
+        [KeyboardButton(text=profile_label), KeyboardButton(text=tariff_label)],
         [KeyboardButton(text="❓ Помощь")]
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
@@ -1709,7 +1722,7 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
          
          # Redirect to Start (Main Menu)
          user = await get_user(message.from_user.id)
-         await message.answer("🏠 **Главное меню**", reply_markup=get_main_menu(user.tariff))
+         await message.answer("🏠 **Главное меню**", reply_markup=get_main_menu(user.tariff, user.balance if user else None))
          return
 
     if not text and not message.photo:
@@ -1773,7 +1786,8 @@ async def handle_unknown_text(message: types.Message, state: FSMContext):
         return
 
     user = await get_user(message.chat.id)
-    level = user.access_level if user else 'demo'
+    level = user.tariff if user else 'demo'
+    balance = user.balance if user else None
 
     msg = (
         "🤖 **Я вас не понял.**\n"
@@ -1782,7 +1796,7 @@ async def handle_unknown_text(message: types.Message, state: FSMContext):
         "🔹 **Хотите поговорить?** Диалог поддерживается **только** в режиме `/pro` (для Full/Admin). В режимах Flash/Imagen диалог после генерации не работает.\n\n"
         "Для новой генерации нажмите одну из кнопок ниже 👇"
     )
-    await message.answer(msg, reply_markup=get_main_menu(level), parse_mode="Markdown")
+    await message.answer(msg, reply_markup=get_main_menu(level, balance), parse_mode="Markdown")
 
 async def main():
     logging.info("Starting bot...")
