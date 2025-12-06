@@ -778,7 +778,8 @@ def get_cancel_menu():
         keyboard=[
             [types.KeyboardButton(text="❌ Отмена")]
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
 # --- Command Handlers ---
@@ -1200,12 +1201,13 @@ async def trigger_generation(message: types.Message, state: FSMContext):
              if message.chat.id in chat_sessions:
                  del chat_sessions[message.chat.id]
         
-        # Send Result
+        # Send Result (attach minimal reply keyboard here to avoid extra text message)
         photo = BufferedInputFile(image_bytes, filename=f"banana_{model}.png")
         await message.answer_photo(
              photo,
              caption=final_caption,
-             parse_mode="Markdown"
+             parse_mode="Markdown",
+             reply_markup=reply_keyboard
         )
 
         # Send inline buttons and update reply keyboard
@@ -1216,9 +1218,6 @@ async def trigger_generation(message: types.Message, state: FSMContext):
             dlg_msg = await message.answer("💬 Режим диалога", reply_markup=reply_keyboard)
             # Сохраняем ID сообщения с индикатором диалога, чтобы можно было удалить при завершении
             await state.update_data(dialogue_indicator_msg_id=dlg_msg.message_id, actions_msg_id=actions_msg.message_id)
-        else:
-            # Для моделей без диалога тоже показываем минимальную клавиатуру (Главное меню)
-            await message.answer("🏠 Главное меню", reply_markup=reply_keyboard)
 
 
         
@@ -1791,14 +1790,14 @@ def get_main_menu(tariff: str, balance: int | None = None):
         [KeyboardButton(text=profile_label), KeyboardButton(text=tariff_label)],
         [KeyboardButton(text="❓ Помощь")]
     ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, one_time_keyboard=True)
 
 def get_minimal_menu():
     """Returns a minimal reply keyboard with just 'Main Menu'."""
     kb = [
         [KeyboardButton(text="🏠 Главное меню")]
     ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True, one_time_keyboard=True)
 
 
 @dp.message(CreationStates.waiting_for_prompt)
