@@ -1098,7 +1098,7 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         model_meta = MODEL_DISPLAY.get(model, {})
         supports_dialogue = model_meta.get("supports_dialogue", False)
 
-        if supports_dialogue and tariff == 'full':
+        if supports_dialogue and tariff != 'demo':
              final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
              await state.set_state(GenStates.dialogue_standby)
              reply_keyboard = get_dialogue_menu()
@@ -1286,7 +1286,7 @@ async def process_dialogue_standby(message: types.Message, state: FSMContext):
 
     # 2. Check Tariff
     user = await get_user(message.from_user.id)
-    if user.tariff != 'full' and user.access_level != 'admin':
+    if user.tariff == 'demo' and user.access_level != 'admin':
          # Show upgrade message with inline buttons
          confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
              [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="dialogue:upgrade")],
