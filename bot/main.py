@@ -1094,10 +1094,15 @@ async def trigger_generation(message: types.Message, state: FSMContext):
             ]
         ])
         
-        if (tariff == 'full' or user.access_level=='admin' or tariff == 'basic') and model == 'nano_banana_pro':
+        # Check if dialogue is supported
+        model_meta = MODEL_DISPLAY.get(model, {})
+        supports_dialogue = model_meta.get("supports_dialogue", False)
+
+        if supports_dialogue and tariff == 'full':
              final_caption += "\n\n💬 *Вы можете продолжить диалог или создать новый.*"
              await state.set_state(GenStates.dialogue_standby)
              reply_keyboard = get_dialogue_menu()
+             # Don't clear chat session for dialogue models
         else:
              await state.clear()
              # Clear session if not continuing
@@ -1262,48 +1267,75 @@ async def show_creation_start(message: types.Message, user: User, is_edit=False)
 @dp.message(GenStates.dialogue_standby)
 async def process_dialogue_standby(message: types.Message, state: FSMContext):
     # 1. Capture Input
-    prompt = message.text or message.caption
+    dialogue_text = message.text or message.caption
     ref_image = None
-    
+
     if message.photo:
          ref_image = message.photo[-1] # ID
-         if not prompt:
-             prompt = "" # Allow empty prompt if image? Usually need prompt.
-             
-    if not prompt and not ref_image:
+         if not dialogue_text:
+             dialogue_text = "" # Allow empty prompt if image
+
+    if not dialogue_text and not ref_image:
         await message.answer("⚠️ Пришлите текст или фото для продолжения диалога.")
         return
 
     # Check Navigation/Cancel commands explicitly
-    if prompt and (prompt == "🏠 Главное меню" or prompt == "✅ Завершить диалог" or prompt.lower() in ["/start", "cancel", "отмена"]):
+    if dialogue_text and (dialogue_text == "🏠 Главное меню" or dialogue_text == "✅ Завершить диалог" or dialogue_text.lower() in ["/start", "cancel", "отмена"]):
          await cmd_cancel(message, state) # Handled by cancel
          return
 
     # 2. Check Tariff
     user = await get_user(message.from_user.id)
-    # Rules: Demo - No dialogue? Basic/Full - Yes.
-    if user.tariff == 'demo':
-         await message.answer(
-             "🔒 **Диалог доступен только на тарифах Basic и Full.**\n"
-             "Перейдите на новый уровень, чтобы уточнять генерации!",
-             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💎 Тарифы", callback_data="nav:upgrade")]])
+    if user.tariff != 'full' and user.access_level != 'admin':
+         # Show upgrade message with inline buttons
+         confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
+             [InlineKeyboardButton(text="💎 Сменить тариф", callback_data="dialogue:upgrade")],
+             [InlineKeyboardButton(text="❌ Отказаться", callback_data="dialogue:cancel")]
+         ])
+
+         confirm_msg = await message.answer(
+             "🔒 **Режим диалога доступен только на тарифе ПОЛНЫЙ**\n\n"
+             "Перейдите на тариф ПОЛНЫЙ, чтобы продолжить диалог с моделью.",
+             reply_markup=confirm_markup
+         )
+
+         # Store message IDs for cleanup
+         await state.update_data(
+             user_message_id=message.message_id,
+             confirm_message_id=confirm_msg.message_id,
+             dialogue_text=dialogue_text,
+             dialogue_ref_file_id=ref_image.file_id if ref_image else None
          )
          return
 
-    # 3. Save Context
-    # We need to pass this input to generation later.
-    # Update prompt in state? Or "dialogue_prompt".
-    # trigger_generation reads 'prompt'. 
-    await state.update_data(prompt=prompt)
-    if ref_image:
-         # Download logic? trigger_generation expects "ref_images" as bytes list in state?
-         # Or we handle it here. 
-         # Let's defer downloading to trigger_generation to keep logic central. 
-         # Store file_id in "dialogue_ref_file_id"
-         await state.update_data(dialogue_ref_file_id=ref_image.file_id)
+    # 3. Save Context and show confirmation
+    data = await state.get_data()
+    model = data.get("model", "gemini-3-pro-image-preview")
+    cost = MODEL_PRICES.get(model, 400)  # Default to Pro price
 
-    # 4. Confirm Deduction
-    cost = MODEL_PRICES.get('nano_banana_pro', 0)
+    # Show confirmation message with inline buttons
+    confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить", callback_data="dialogue:confirm")],
+        [InlineKeyboardButton(text="❌ Завершить", callback_data="dialogue:cancel")]
+    ])
+
+    confirm_msg = await message.answer(
+        f"💬 **Подтверждение диалога**\n\n"
+        f"Диалог с моделью будет продолжен.\n"
+        f"💰 Будет списано: **{cost} NC**\n"
+        f"💼 Ваш баланс: **{user.balance} NC**\n\n"
+        f"Отправить сообщение модели?",
+        reply_markup=confirm_markup
+    )
+
+    # Store data for confirmation
+    await state.update_data(
+        user_message_id=message.message_id,
+        confirm_message_id=confirm_msg.message_id,
+        dialogue_text=dialogue_text,
+        dialogue_ref_file_id=ref_image.file_id if ref_image else None
+    )
+    await state.set_state(GenStates.dialogue_confirm)
     
     msg = (
         f"💬 **Продолжение диалога**\n"
@@ -1322,29 +1354,55 @@ async def process_dialogue_standby(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("dialogue:"))
 async def process_dialogue_confirm_callback(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":")[1]
-    
-    if action == "finish":
+    data = await state.get_data()
+
+    if action == "upgrade":
+        # Send user to tariff upgrade
         await callback.message.delete()
+        # Delete user's original message too
+        user_msg_id = data.get("user_message_id")
+        if user_msg_id:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, user_msg_id)
+            except:
+                pass
         await state.clear()
-        user = await get_user(callback.from_user.id)
-        await callback.message.answer("✅ Диалог завершен.", reply_markup=get_main_menu(user.tariff))
+        await cmd_upgrade(callback.message)
         await callback.answer()
-        return
-        
-    elif action == "continue":
+
+    elif action == "cancel":
+        # Cancel dialogue - delete messages
+        await callback.message.delete()
+        user_msg_id = data.get("user_message_id")
+        if user_msg_id:
+            try:
+                await callback.bot.delete_message(callback.message.chat.id, user_msg_id)
+            except:
+                pass
+        await state.clear()
+        await callback.answer()
+
+    elif action == "confirm":
+        # Proceed with dialogue generation
         await callback.message.delete() # Delete confirm prompt
-        await callback.message.answer("⏳ Генерирую ответ...")
-        # Trigger Generation
-        # We need to signal that this is a dialogue continuation.
-        # trigger_generation uses state. If we updated 'prompt', it should use it.
-        # But we need to ensure it uses the EXISTING session.
-        # We will add a flag in state? 'is_dialogue_continuation' = True
-        await state.update_data(is_dialogue_continuation=True)
-        
-        # Call trigger logic. trigger_generation takes (message, state).
-        # We pass callback.message (which handles answer/reply).
+        processing_msg = await callback.message.answer("⏳ Генерирую ответ...")
+
+        # Update state with dialogue data
+        await state.update_data(
+            prompt=data.get("dialogue_text"),
+            dialogue_ref_file_id=data.get("dialogue_ref_file_id"),
+            is_dialogue_continuation=True
+        )
+
+        # Call trigger logic
         await trigger_generation(callback.message, state)
         await callback.answer()
+
+        # Clean up processing message
+        try:
+            await processing_msg.delete()
+        except:
+            pass
 
 @dp.message(F.text == "🎨 К созданию")
 
@@ -1474,6 +1532,7 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
     price_base = MODEL_PRICES.get(model, 0)
     supports_res = meta.get("supports_resolution", False)
     supports_refs = meta.get("supports_references", False)
+    supports_dialogue = meta.get("supports_dialogue", False)
 
     # Calculate Cost
     surcharge = 0
@@ -1492,10 +1551,12 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
     if supports_res:
         text += f"🔍 Качество: **{res}**\n"
     
-    text += f"\n💰 Стоимость: **{total_cost} NC**\n\n"
-    
-    # Prompt Instructions
-    text += "✏️ **Введите промпт:**\nПросто напишите, что хотите увидеть.\n"
+    text += f"\n💰 Стоимость: **{total_cost} NC**\n"
+
+    if supports_dialogue:
+        text += "💬 **Поддерживает режим диалога**\n"
+
+    text += "\n✏️ **Введите промпт:**\nПросто напишите, что хотите увидеть.\n"
 
     # Build markup
     markup = InlineKeyboardMarkup(inline_keyboard=[])
