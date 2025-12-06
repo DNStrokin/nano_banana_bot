@@ -611,6 +611,24 @@ async def process_nav_callback(callback: CallbackQuery):
     
     await callback.answer()
 
+# Balance-related CTA callbacks (subscribe/upgrade/coins)
+@dp.callback_query(F.data.startswith("balance:"))
+async def process_balance_cta(callback: CallbackQuery, state: FSMContext):
+    action = callback.data.split(":")[1]
+    if action == "subscribe" or action == "upgrade":
+        await cmd_upgrade(callback.message)
+    elif action == "coins":
+        # Переиспользуем магазин NC
+        markup = InlineKeyboardMarkup(inline_keyboard=[])
+        for key, pkg in PACKAGES.items():
+            btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
+            if pkg['bonus_percent'] > 0:
+                btn_text += f" (+{pkg['bonus_percent']}%)"
+            markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
+        markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
+        await callback.message.answer("💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:", reply_markup=markup, parse_mode="Markdown")
+    await callback.answer()
+
 @dp.callback_query(F.data == "cancel_action")
 async def process_cancel_action(callback: CallbackQuery):
     await callback.message.delete()
@@ -1003,12 +1021,31 @@ async def trigger_generation(message: types.Message, state: FSMContext):
     
     # Check Balance
     if user.balance < cost:
+        # Подготовка кнопок в зависимости от тарифа
+        tariff_lower = user.tariff.lower()
+        buttons = []
+        if tariff_lower == "demo":
+            buttons = [
+                InlineKeyboardButton(text="🧾 Оформить подписку", callback_data="balance:subscribe"),
+                InlineKeyboardButton(text="💰 Купить монеты", callback_data="balance:coins")
+            ]
+        elif tariff_lower == "basic":
+            buttons = [
+                InlineKeyboardButton(text="⬆️ Повысить тариф", callback_data="balance:upgrade"),
+                InlineKeyboardButton(text="💰 Купить монеты", callback_data="balance:coins")
+            ]
+        else:  # full/admin
+            buttons = [
+                InlineKeyboardButton(text="💰 Купить монеты", callback_data="balance:coins")
+            ]
+        markup = InlineKeyboardMarkup(inline_keyboard=[buttons])
+
         await message.answer(
             f"📉 **Недостаточно средств!**\n"
             f"Стоимость: `{cost} NC`\n"
-            f"Ваш баланс: `{user.balance} NC`\n\n"
-            f"Пополнить: `/buy`",
-            parse_mode="Markdown"
+            f"Ваш баланс: `{user.balance} NC`",
+            parse_mode="Markdown",
+            reply_markup=markup
         )
         return
 
