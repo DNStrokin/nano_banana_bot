@@ -1700,6 +1700,11 @@ async def handle_unknown_text(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     logging.info(f"Unknown text handler triggered. Current state: {current_state}, User: {message.from_user.id}, Text: {message.text}")
 
+    # Don't handle messages that are in dialogue states
+    if current_state and current_state.startswith('GenStates:'):
+        logging.info(f"Ignoring message in state {current_state}")
+        return
+
     user = await get_user(message.chat.id)
     level = user.access_level if user else 'demo'
 
