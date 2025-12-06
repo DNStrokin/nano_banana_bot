@@ -11,7 +11,7 @@ from config import config
 from database import init_db, add_or_update_user, get_user, update_user_access, log_generation, get_stats, get_all_users_stats, update_generation_status, get_user_balance, update_balance, set_user_tariff, User, Generation, async_session
 from sqlalchemy import select, func
 from nano_service import nano_service
-from pricing import calculate_cost, validate_request, TARIFFS, PACKAGES, MODEL_PRICES, RUB_TO_NC
+from pricing import calculate_cost, validate_request, TARIFFS, PACKAGES, MODEL_PRICES, RUB_TO_NC, MODEL_DISPLAY, ASPECT_RATIOS, RESOLUTION_SURCHARGES
 
 
 # Configure logging
@@ -537,6 +537,7 @@ async def cmd_add_nc(message: types.Message):
         await message.answer(f"Error: {e}")
 
 @dp.message(Command("profile"))
+@dp.message(F.text == "👤 Мой кабинет")
 async def cmd_profile(message: types.Message):
     user = await get_user(message.from_user.id)
     if not user:
@@ -754,13 +755,7 @@ async def cmd_back(message: types.Message, state: FSMContext):
     level = user.tariff if user else 'demo'
     await message.answer("🏠 Главное меню", reply_markup=get_main_menu(level))
 
-@dp.message(F.text == "🎨 К созданию")
-async def cmd_creation_menu(message: types.Message):
-    await message.answer("🎨 Выберите нейросеть для генерации:", reply_markup=get_creation_menu())
 
-@dp.message(F.text == "👤 Мой кабинет")
-async def cmd_my_cabinet(message: types.Message):
-    await cmd_profile(message)
 
 # Existing handlers...
 
@@ -1000,7 +995,7 @@ async def trigger_generation(message: types.Message, state: FSMContext):
     ref_info = f"\n📎 Refs: {len(refs)}" if refs else ""
     status_text = (
         f"🍌 **Генерирую...** (`{model}`)\n"
-        f"💰 Списано: `{cost} NC` (Остаток: `{new_balance}`)\n"
+        f"💰 Будет списано: `{cost} NC` (Останется: `{new_balance}`)\n"
         f"📝 `{prompt[:50] + '...' if len(prompt)>50 else prompt}`\n"
         f"📐 AR: `{ar}`"
         f"{ref_info}"
@@ -1061,24 +1056,44 @@ async def trigger_generation(message: types.Message, state: FSMContext):
 
         # Format Caption
         model_display = MODEL_NAMES.get(model, model)
-        token_text = f"Использовано {token_count} {get_token_suffix(token_count)}"
+        # token_text removed by user request
         
+        # Truncate prompt for caption (safety limit)
+        display_prompt = prompt[:900] + "..." if len(prompt) > 900 else prompt
+        # Escape backticks to prevent markdown breakage
+        display_prompt = display_prompt.replace("`", "'")
+
         final_caption = (
-            f"✨ Готово! {model_display}\n"
-            f"💸 {cost} NC | 💼 {new_balance} NC\n"
-            f"{token_text}\n\n"
-            f"🍌 @dimastro_banana_bot"
+            f"✨ Готово! *{model_display}*\n"
+            f"💸 Списано: {cost} NC | 💼 Баланс: {new_balance} NC\n\n"
+            f"📌 *Промпт:*\n"
+            f"```\n{display_prompt}\n```\n"
+            f"🍌 @dimastro\_banana\_bot"
         )
 
         # Logic for Dialogue continuation
         # Re-fetch user to get latest state if needed
-        keyboard = get_main_menu(tariff)
+        # DEFAULT: Minimal menu + Inline Result Actions
+        reply_keyboard = get_minimal_menu()
+        
+        # Prepare Callback Data (Safe Encoding)
+        ar_safe = ar.replace(':', '_')
+        res_clean = target_res # e.g. 1024x1024 or 4K. Should be safe.
+        
+        # Inline Result Actions
+        result_inline = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Создать ещё", callback_data=f"create:again:{model}:{ar_safe}:{res_clean}"),
+                InlineKeyboardButton(text="⬅️ К другой модели", callback_data="create:back:start")
+            ]
+        ])
         
         if (tariff == 'full' or user.access_level=='admin') and model == 'nano_banana_pro':
-             final_caption += "\n\n💬 **Редактирование:** Напишите, что изменить (или нажмите кнопку)."
+             final_caption += "\n\n💬 *Редактирование:* Напишите, что изменить (или нажмите кнопку)."
              await state.set_state(GenStates.dialogue)
-             keyboard = get_dialogue_menu()
-             # We keep data (model, etc) in state
+             reply_keyboard = get_dialogue_menu()
+             # Keep inline buttons? Maybe not, dialogue assumes text interaction. 
+             # But "Create Again" is useful. Let's keep them attached to the image.
         else:
              await state.clear()
              # Clear session if not continuing
@@ -1090,14 +1105,53 @@ async def trigger_generation(message: types.Message, state: FSMContext):
         await message.answer_photo(
             photo, 
             caption=final_caption,
-            reply_markup=keyboard 
+            reply_markup=result_inline, # Inline goes to photo
+            parse_mode="Markdown"
         )
+        # Send Reply Keyboard separately if needed? No, answer_photo takes reply_markup.
+        # WAIT. answer_photo can accept Inline OR Reply. But not both in same message object.
+        # Actually in Telegram Bot API: reply_markup can be InlineKeyboardMarkup or ReplyKeyboardMarkup.
+        # But we want BOTH: Inline buttons under image, AND Reply buttons at bottom.
+        # This is NOT possible in one message.
+        # We must send Reply Keyboard in a separate message or ensure it's persistent.
+        # Since we are sending a Photo, we should attach Inline buttons to it.
+        # And if we want to change Reply Keyboard, we usually send a specific text message "Menu updated" or just rely on previous state.
+        # But user wants "Minimal buttons... when navigating".
+        # If I send a photo with Inline, the old Reply Keyboard persists unless I send a new message with new Reply Keyboard.
+        # I can send a "status" message that deletes itself? Or just update it via `processing_msg` deletion?
+        # Actually, `processing_msg` was `await message.answer(...)`. I can edit THAT to show "Done" and update Reply Keyboard? 
+        # But `processing_msg` is text. I want Photo.
         
-        # Cleanup status
+        # Strategy:
+        # 1. Send Photo with Inline Buttons.
+        # 2. To update Reply Keyboard, I might need to send a dummy message or just accept current state?
+        # User said: "Оставим только кнопку 'Вернуться в главное меню'".
+        # I updates show_config_menu to possibly *not* update reply keyboard (it edits inline).
+        # But trigger_generation starts from `message` (user prompt).
+        # I should probably send a text message with the Reply Keyboard if it's not set.
+        # OR: `processing_msg` (which says "Generating...") usually has the current keyboard.
+        # I cannot update keyboard without sending a message (except editing an existing text message).
+        # If I delete `processing_msg`, keyboard persists.
+        # If I want to FORCE clear/set keyboard, I must send a message.
+        # Maybe: `await message.answer("✅", reply_markup=get_minimal_menu())` then delete it? No, keyboard persists only if message exists? No, persistent.
+        # Actually, best practice: Send Photo. Then (or before) send a text "Here is your image" with ReplyMarkup? No, cluttered.
+        # I'll stick to: Send Photo handling Inline. 
+        # And I'll rely on the fact that `cmd_creation_entry` or `show_config_menu` *should* have set the Minimal Keyboard.
+        # I will update `cmd_creation_entry` to set Minimal Keyboard.
+        
+        # Cleanup
         try:
             await processing_msg.delete()
         except:
             pass
+            
+        # Delete Config Message (Menu)
+        config_msg_id = data.get("config_message_id")
+        if config_msg_id:
+             try:
+                 await message.bot.delete_message(chat_id=message.chat.id, message_id=config_msg_id)
+             except:
+                 pass
 
     except Exception as e:
         # REFUND
@@ -1175,6 +1229,327 @@ async def process_prompt_input(message: types.Message, state: FSMContext):
 
     processing_tasks[key] = asyncio.create_task(delayed_generation())
 
+
+
+@dp.message(Command("help"))
+@dp.message(F.text == "❓ Помощь")
+async def cmd_help(message: types.Message):
+    text = (
+        "🍌 **Nano Banana Bot Help**\n\n"
+        "**Режимы:**\n"
+        "⚡ **Flash**: Быстро, бесплатно (Demo), для тестов.\n"
+        "🍌 **Pro**: Умный режим, высокое качество, диалог.\n"
+        "📸 **Imagen**: Фотореализм (только генерация).\n\n"
+        "**Валюта (NC):**\n"
+        "Используется для оплаты генераций. Баланс пополняется покупкой пакетов или подпиской.\n\n"
+        "**Команды в чате:**\n"
+        "--ar X:Y (например --ar 16:9) - Соотношение сторон\n"
+        "--4k - Повышенное разрешение (для Full)\n\n"
+        "**Поддержка:** @admin_handle"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+# --- Creation Flow ---
+class CreationStates(StatesGroup):
+    choosing_mode = State()
+    choosing_family = State()
+    choosing_model = State()
+    configuring = State()
+    waiting_for_prompt = State()
+
+async def show_creation_start(message: types.Message, user: User, is_edit=False):
+    text = (
+        f"🎨 **Мастерская Nano Banana**\n\n"
+        f"👤 Тариф: **{user.tariff.upper()}**\n"
+        f"💰 Баланс: **{user.balance} NC**\n\n"
+        f"Что будем создавать?"
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼 Создать изображение", callback_data="create:mode:image")],
+        [InlineKeyboardButton(text="🎥 Создать видео (Beta)", callback_data="create:mode:video")]
+    ])
+    if is_edit:
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+
+@dp.message(F.text == "🎨 К созданию")
+async def cmd_creation_entry(message: types.Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    # Update Reply Keyboard (Minimal)
+    await message.answer("🎨 **Мастерская**", reply_markup=get_minimal_menu())
+    # Show Inline UI
+    await show_creation_start(message, user)
+
+@dp.callback_query(F.data.startswith("create:"))
+async def process_create_callback(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    action = parts[1] # mode, family, model, config, prompt_form
+    value = parts[2] if len(parts) > 2 else None
+    
+    user = await get_user(callback.from_user.id)
+    
+    if action == "mode":
+        if value == "video":
+            await callback.answer("Видео пока в разработке! 🚧", show_alert=True)
+            return
+        
+        # Show Families
+        text = "🤖 **Выберите тип модели:**\n\n" \
+               "🍌 **Nano Banana** — умные модели от Google (Gemini)\n" \
+               "📸 **Imagen** — фотореализм от Google"
+               
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🍌 Nano Banana", callback_data="create:family:banana")],
+            [InlineKeyboardButton(text="📸 Imagen", callback_data="create:family:imagen")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="create:back:start")]
+        ])
+        await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        
+    elif action == "family":
+        family = value
+        # Show specific models filtered by family
+        markup = InlineKeyboardMarkup(inline_keyboard=[])
+        
+        for mid, meta in MODEL_DISPLAY.items():
+            if meta['family'] != family:
+                continue
+                
+            price = MODEL_PRICES.get(mid, 0)
+            btn_text = f"{meta['name']} — {price} NC"
+            markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"create:model:{mid}")])
+            
+        markup.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="create:mode:image")])
+        
+        await callback.message.edit_text("🧠 **Выберите модель:**", parse_mode="Markdown", reply_markup=markup)
+        
+    elif action == "model":
+        model_id = value
+        # Set model in state
+        await state.update_data(model=model_id)
+        # Default config if not set
+        data = await state.get_data()
+        if not data.get("aspect_ratio"):
+            await state.update_data(aspect_ratio="1:1")
+        if not data.get("resolution"):
+             await state.update_data(resolution="1024x1024")
+        
+        await show_config_menu(callback.message, state, user)
+        
+    elif action == "config":
+        # create:config:ar:16:9
+        # create:config:res:4K
+        sub_action = parts[2]
+        
+        if sub_action == "ar":
+            val = parts[3] + ":" + parts[4] if len(parts) > 4 else parts[3]
+            await state.update_data(aspect_ratio=val)
+        elif sub_action == "res":
+             val = parts[3]
+             # Check access
+             user_tariff_rules = TARIFFS.get(user.tariff, TARIFFS['demo'])
+             can_high_res = user_tariff_rules.get('can_use_2k_4k', False)
+             
+             if val in ["2K", "4K"] and not can_high_res and user.tariff != 'admin':
+                 await callback.answer(
+                     f"🔒 Разрешение {val} доступно только на тарифе FULL.\n"
+                     "Используйте /upgrade для перехода.", 
+                     show_alert=True
+                 )
+                 return
+             
+             await state.update_data(resolution=val)
+             
+        await show_config_menu(callback.message, state, user)
+
+    elif action == "again":
+         # create:again:model:ar_safe:res
+         # e.g. create:again:nano_banana:16_9:1024x1024
+         if len(parts) >= 5:
+             model_id = parts[2]
+             ar_safe = parts[3]
+             res = parts[4]
+             
+             ar = ar_safe.replace('_', ':')
+             
+             await state.update_data(model=model_id, aspect_ratio=ar, resolution=res)
+             await show_config_menu(callback.message, state, user)
+         else:
+             # Fallback if somehow empty
+             await callback.answer("Ошибка данных повтора.", show_alert=True)
+
+    elif action == "back":
+        if value == "start":
+             await show_creation_start(callback.message, user, is_edit=True)
+    
+    await callback.answer()
+
+async def show_config_menu(message: types.Message, state: FSMContext, user: User):
+    # Set state immediately so user can type
+    await state.set_state(CreationStates.waiting_for_prompt)
+    
+    data = await state.get_data()
+    model = data.get("model")
+    ar = data.get("aspect_ratio", "1:1")
+    res = data.get("resolution", "1024x1024")
+    
+    meta = MODEL_DISPLAY.get(model, {})
+    price_base = MODEL_PRICES.get(model, 0)
+    supports_res = meta.get("supports_resolution", False)
+    supports_refs = meta.get("supports_references", False)
+
+    # Calculate Cost
+    surcharge = 0
+    if supports_res and res in RESOLUTION_SURCHARGES:
+        surcharge = RESOLUTION_SURCHARGES.get(res, 0)
+        
+    total_cost = price_base + surcharge
+    
+    # Build Text
+    text = (
+        f"⚙️ **Настройка генерации**\n\n"
+        f"🧠 Модель: **{meta.get('name', model)}**\n"
+        f"📐 AR: **{ar}**\n"
+    )
+    
+    if supports_res:
+        text += f"🔍 Качество: **{res}**\n"
+    
+    text += f"\n💰 Стоимость: **{total_cost} NC**\n\n"
+    
+    # Prompt Instructions
+    text += "✏️ **Введите промпт:**\nПросто напишите, что хотите увидеть.\n"
+    
+    # Ref instructions
+    if supports_refs:
+         user_tariff_rules = TARIFFS.get(user.tariff, TARIFFS['demo'])
+         max_refs = user_tariff_rules.get('max_refs', 0)
+         
+         if max_refs > 0:
+             text += f"\n📸 Можно прикрепить до **{max_refs}** фото-референсов."
+         else:
+             text += (
+                 "\n⚠️ Референсы (фото) недоступны на вашем тарифе.\n"
+                 "✨ /upgrade — разблокировать загрузку фото."
+             )
+    
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    # AR Row
+    ar_row = []
+    for ratio in ASPECT_RATIOS:
+        label = f"✅ {ratio}" if ratio == ar else ratio
+        ar_row.append(InlineKeyboardButton(text=label, callback_data=f"create:config:ar:{ratio}"))
+    markup.inline_keyboard.append(ar_row)
+    
+    # Res Row (Only if supported)
+    if supports_res:
+        res_row = []
+        options = ["1024x1024", "2K", "4K"]
+        
+        user_tariff_rules = TARIFFS.get(user.tariff, TARIFFS['demo'])
+        can_high_res = user_tariff_rules.get('can_use_2k_4k', False)
+        
+        for opt in options:
+            opt_label = "SD" if opt == "1024x1024" else opt
+            if opt in RESOLUTION_SURCHARGES:
+                 opt_label += f" (+{RESOLUTION_SURCHARGES[opt]} NC)"
+            
+            is_locked = False
+            if opt in ["2K", "4K"] and not can_high_res and user.tariff != 'admin':
+                is_locked = True
+                
+            if is_locked:
+                 opt_label = f"🔒 {opt_label}"
+            
+            if opt == res and not is_locked:
+                opt_label = f"✅ {opt_label}"
+            
+            res_row.append(InlineKeyboardButton(text=opt_label, callback_data=f"create:config:res:{opt}"))
+        markup.inline_keyboard.append(res_row)
+    
+    # No "Enter Prompt" button anymore!
+    meta_fam = meta.get('family', 'banana')
+    markup.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад к списку", callback_data=f"create:family:{meta_fam}")])
+    
+    try:
+        await message.edit_text(text, parse_mode="Markdown", reply_markup=markup)
+        msg_id = message.message_id
+    except:
+        new_msg = await message.answer(text, parse_mode="Markdown", reply_markup=markup)
+        msg_id = new_msg.message_id
+        
+    # Save ID for later deletion
+    await state.update_data(config_message_id=msg_id)
+
+def get_minimal_menu():
+    """Returns a minimal reply keyboard with just 'Main Menu'."""
+    kb = [
+        [KeyboardButton(text="🏠 Главное меню")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+
+@dp.message(CreationStates.waiting_for_prompt)
+async def process_creation_prompt(message: types.Message, state: FSMContext):
+    # Capture prompt
+    text = message.text or message.caption
+    
+    # Check for Navigation / Cancel
+    if text and (text == "🏠 Главное меню" or text.lower() in ["/start", "отмена", "cancel"]):
+         # Reset flow
+         await state.clear()
+         # Delete the config message to be clean?
+         data = await state.get_data()
+         config_msg_id = data.get("config_message_id")
+         if config_msg_id:
+             try:
+                 await message.bot.delete_message(message.chat.id, config_msg_id)
+             except:
+                 pass
+         
+         # Redirect to Start (Main Menu)
+         user = await get_user(message.from_user.id)
+         await message.answer("🏠 **Главное меню**", reply_markup=get_main_menu(user.tariff))
+         return
+
+    if not text and not message.photo:
+         await message.answer("⚠️ Пришлите текст или фото.")
+         return
+         
+    await state.update_data(prompt=text)
+    
+    if message.photo:
+         refs = []
+         refs.append(message.photo[-1].file_id)
+         await state.update_data(ref_images=refs)
+         
+    # Generate!
+    await trigger_generation(message, state) # Reads from state
+    
+    data = await state.get_data()
+    model = data.get("model", "")
+    
+    # Transition Logic
+    if "pro" in model:
+        await state.set_state(GenStates.dialogue)
+    else:
+        await state.clear()
+
+
+@dp.message(F.text == "🏠 Главное меню")
+async def cmd_main_menu_text(message: types.Message, state: FSMContext):
+    await state.clear()
+    await cmd_start(message)
+
+@dp.message(F.text == "👤 Мой кабинет")
+async def cmd_profile_text(message: types.Message):
+    await cmd_profile(message)
+
+@dp.message(F.text == "💎 Тарифы")
+async def cmd_tariffs_text(message: types.Message):
+    await cmd_upgrade(message)
+
 @dp.message(F.text)
 async def handle_unknown_text(message: types.Message, state: FSMContext):
     # This triggers if no other handler caught it (e.g. not a command, not in FSM state)
@@ -1196,10 +1571,6 @@ async def main():
     # Set bot commands menu
     commands = [
         types.BotCommand(command="start", description="Запустить бота"),
-        types.BotCommand(command="help", description="Справка и список команд"),
-        types.BotCommand(command="pro", description="Nano Banana PRO (Gemini 3 Pro)"),
-        types.BotCommand(command="flash", description="Nano Banana (Gemini 2.5 Flash)"),
-        types.BotCommand(command="imagen", description="Imagen 4 (Только фото)"),
     ]
     await bot.set_my_commands(commands)
     
