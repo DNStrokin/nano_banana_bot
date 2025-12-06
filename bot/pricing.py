@@ -22,8 +22,9 @@ RESOLUTION_SURCHARGES = {
 # UI Metadata
 MODEL_DISPLAY = {
     "imagen-4.0-fast-generate-001": {"name": "Imagen 4 (Fast)", "family": "imagen", "short": "Fast", "supports_resolution": False, "supports_references": False, "supports_dialogue": False},
-    "imagen-4.0-generate-001": {"name": "Imagen 4 (Basic)", "family": "imagen", "short": "Basic", "supports_resolution": False, "supports_references": False, "supports_dialogue": False},
-    "imagen-4.0-ultra-generate-001": {"name": "Imagen 4 (Ultra)", "family": "imagen", "short": "Ultra", "supports_resolution": False, "supports_references": False, "supports_dialogue": False},
+    # Standard/Basic и Ultra поддерживают image_size 1K/2K
+    "imagen-4.0-generate-001": {"name": "Imagen 4 (Basic)", "family": "imagen", "short": "Basic", "supports_resolution": True, "supports_references": False, "supports_dialogue": False},
+    "imagen-4.0-ultra-generate-001": {"name": "Imagen 4 (Ultra)", "family": "imagen", "short": "Ultra", "supports_resolution": True, "supports_references": False, "supports_dialogue": False},
     "gemini-2.5-flash-image": {"name": "Nano Banana (Flash)", "family": "banana", "short": "Flash", "supports_resolution": False, "supports_references": True, "supports_dialogue": True},
     "gemini-3-pro-image-preview": {"name": "Nano Banana (Pro)", "family": "banana", "short": "Pro", "supports_resolution": True, "supports_references": True, "supports_dialogue": True}
 }

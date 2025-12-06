@@ -933,6 +933,13 @@ async def trigger_generation(message: types.Message, state: FSMContext):
     ar = data.get('aspect_ratio', '1:1')
     target_res = data.get('resolution', '1024x1024')
     
+    # Normalize Imagen resolutions (supports only 1K/2K; fast ignores size)
+    if model and "imagen" in model:
+        if target_res == "1024x1024":
+            target_res = "1K"
+        if target_res == "4K":
+            target_res = "2K"
+    
     # Regex for various dashes: -, --, —, –
     match_ar = re.search(r'(?:--|—|–|-)ar\s+(\d+:\d+)', prompt)
     if match_ar:
@@ -1511,10 +1518,12 @@ async def process_create_callback(callback: CallbackQuery, state: FSMContext):
         await state.update_data(model=model_id)
         # Default config if not set
         data = await state.get_data()
+        meta = MODEL_DISPLAY.get(model_id, {})
         if not data.get("aspect_ratio"):
             await state.update_data(aspect_ratio="1:1")
         if not data.get("resolution"):
-             await state.update_data(resolution="1024x1024")
+             default_res = "1K" if meta.get("family") == "imagen" else "1024x1024"
+             await state.update_data(resolution=default_res)
         
         await show_config_menu(callback.message, state, user)
         
@@ -1613,7 +1622,9 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
 
     # AR Row (Aspect Ratio)
     ar_row = []
-    ar_options = ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"]
+    # AR options: для Imagen ограничиваемся допустимыми
+    imagen_ar_options = ["1:1", "3:4", "4:3", "9:16", "16:9"]
+    ar_options = imagen_ar_options if meta.get('family') == 'imagen' else ["1:1", "16:9", "9:16", "4:3", "3:4", "21:9", "9:21"]
     for ratio in ar_options:
         label = ratio
         if ratio == ar:
@@ -1624,13 +1635,14 @@ async def show_config_menu(message: types.Message, state: FSMContext, user: User
     # Res Row (Only if supported)
     if supports_res:
         res_row = []
-        options = ["1024x1024", "2K", "4K"]
+        # Для Imagen используем 1K/2K; для остальных — прежние
+        options = ["1K", "2K"] if meta.get('family') == 'imagen' else ["1024x1024", "2K", "4K"]
         
         user_tariff_rules = TARIFFS.get(user.tariff, TARIFFS['demo'])
         can_high_res = user_tariff_rules.get('can_use_2k_4k', False)
         
         for opt in options:
-            opt_label = "SD" if opt == "1024x1024" else opt
+            opt_label = "SD" if opt in ["1024x1024", "1K"] else opt
             if opt in RESOLUTION_SURCHARGES:
                  opt_label += f" (+{RESOLUTION_SURCHARGES[opt]} NC)"
             

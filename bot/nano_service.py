@@ -34,20 +34,21 @@ class NanoBananaService:
         try:
             # Special handling for Imagen models which use generate_images
             if "imagen" in target_model:
-                 # Imagen 3/4 uses specific client.models.generate_images usually
-                 # and might fail with generate_content or chat sessions.
+                 # Imagen 4 (fast/standard/ultra)
+                 gen_config_args = {
+                     "number_of_images": 1,
+                     "aspect_ratio": aspect_ratio,
+                     "person_generation": "allow_all"  # всегда allow_all по умолчанию
+                 }
+                 # image_size только для стандарт/ultra (fast не поддерживает)
+                 if "fast" not in target_model:
+                     gen_config_args["image_size"] = final_res
                  
-                 # Note: "reference_images" are not standardly supported in imagen-3/4 fast unless via specific inputs? 
-                 # For now we ignore refs for Imagen or assume text-to-image.
-                 
-                response = await asyncio.to_thread(
+                 response = await asyncio.to_thread(
                    self.client.models.generate_images,
                    model=target_model,
                    prompt=prompt,
-                   config=types.GenerateImagesConfig(
-                       number_of_images=1,
-                       aspect_ratio=aspect_ratio
-                   )
+                   config=types.GenerateImagesConfig(**gen_config_args)
                 )
                 if response.generated_images:
                     return response.generated_images[0].image.image_bytes, 0, None # No token count/chat for Imagen
