@@ -13,11 +13,10 @@ services:
   webapp:
     build: ./web-app
     ports:
-      - "3000:3000"
-    volumes:
-      - ./web-app:/app
-      - /app/node_modules
-    command: npm run dev
+      - "3000:80"
+    restart: always
+    depends_on:
+      - bot
 
   db:
     image: postgres:15-alpine
@@ -27,6 +26,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-nano_banana}
     ports:
       - "5432:5432"
+    restart: always
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
