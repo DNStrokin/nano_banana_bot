@@ -7,8 +7,6 @@ services:
     depends_on:
       - db
     restart: always
-    volumes:
-      - ./bot:/app
 
   webapp:
     build: ./web-app
