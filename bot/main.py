@@ -13,6 +13,7 @@ from database import init_db, add_or_update_user, get_user, update_user_access, 
 from sqlalchemy import select, func
 from nano_service import nano_service
 from pricing import calculate_cost, validate_request, TARIFFS, PACKAGES, MODEL_PRICES, RUB_TO_NC, MODEL_DISPLAY, ASPECT_RATIOS, RESOLUTION_SURCHARGES
+from navigation import ROUTE_PROFILE, ROUTE_SHOP, ROUTE_TARIFFS, resolve_profile_navigation
 
 
 # Configure logging
@@ -76,6 +77,48 @@ async def notify_admins_request(user: User):
             await bot.send_message(admin_id, text, reply_markup=markup, parse_mode="Markdown")
         except:
             pass # Admin might have blocked bot
+
+
+def build_shop_markup() -> InlineKeyboardMarkup:
+    """Единый конструктор магазина, чтобы не дублировать ветки навигации."""
+    markup = InlineKeyboardMarkup(inline_keyboard=[])
+    for key, pkg in PACKAGES.items():
+        btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
+        if pkg['bonus_percent'] > 0:
+            btn_text += f" (+{pkg['bonus_percent']}%)"
+        markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
+
+    markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
+    return markup
+
+
+async def open_shop(message: types.Message):
+    await message.answer(
+        "💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:",
+        reply_markup=build_shop_markup(),
+        parse_mode="Markdown"
+    )
+
+
+
+
+async def reset_user_navigation(message: types.Message, state: FSMContext):
+    """Унифицированный выход из любого пользовательского сценария без тупиков."""
+    data = await state.get_data()
+
+    # Cleanup session/context
+    if message.chat.id in chat_sessions:
+        del chat_sessions[message.chat.id]
+
+    for key in ["dialogue_indicator_msg_id", "config_message_id", "workshop_message_id", "actions_msg_id"]:
+        msg_id = data.get(key)
+        if msg_id:
+            try:
+                await message.bot.delete_message(message.chat.id, msg_id)
+            except:
+                pass
+
+    await state.clear()
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -587,28 +630,13 @@ async def cmd_profile(message: types.Message):
 @dp.callback_query(F.data.startswith("nav:"))
 async def process_nav_callback(callback: CallbackQuery):
     action = callback.data.split(":")[1]
-    
-    # Reuse existing logic by calling the handlers or simulating functionality
-    # But handlers expect Message, not CallbackQuery. We can't direct call cleanly without adapting.
-    # So we adapt.
-    
-    if action == "buy":
-        # Simulate cmd_buy logic
-        markup = InlineKeyboardMarkup(inline_keyboard=[])
-        for key, pkg in PACKAGES.items():
-            btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
-            if pkg['bonus_percent'] > 0:
-                btn_text += f" (+{pkg['bonus_percent']}%)"
-            markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
-        
-        # Add Cancel
-        markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
-        
-        await callback.message.answer("💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:", reply_markup=markup, parse_mode="Markdown")
-        
-    elif action == "upgrade":
-        await cmd_upgrade(callback.message) # cmd_upgrade uses message.answer which is fine on callback.message (it's a Message object)
-    
+    route = resolve_profile_navigation(action)
+
+    if route == ROUTE_SHOP:
+        await open_shop(callback.message)
+    elif route == ROUTE_TARIFFS:
+        await cmd_upgrade(callback.message)
+
     await callback.answer()
 
 # Balance-related CTA callbacks (subscribe/upgrade/coins)
@@ -618,15 +646,7 @@ async def process_balance_cta(callback: CallbackQuery, state: FSMContext):
     if action == "subscribe" or action == "upgrade":
         await cmd_upgrade(callback.message)
     elif action == "coins":
-        # Переиспользуем магазин NC
-        markup = InlineKeyboardMarkup(inline_keyboard=[])
-        for key, pkg in PACKAGES.items():
-            btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
-            if pkg['bonus_percent'] > 0:
-                btn_text += f" (+{pkg['bonus_percent']}%)"
-            markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
-        markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
-        await callback.message.answer("💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:", reply_markup=markup, parse_mode="Markdown")
+        await open_shop(callback.message)
     await callback.answer()
 
 @dp.callback_query(F.data == "cancel_action")
@@ -637,18 +657,7 @@ async def process_cancel_action(callback: CallbackQuery):
 @dp.message(Command("buy"))
 @dp.message(F.text == "💰 Пополнение")
 async def cmd_buy(message: types.Message):
-    markup = InlineKeyboardMarkup(inline_keyboard=[])
-    for key, pkg in PACKAGES.items():
-        btn_text = f"{pkg['name']} ({pkg['nc']} NC) - {pkg['price_rub']}₽"
-        if pkg['bonus_percent'] > 0:
-            btn_text += f" (+{pkg['bonus_percent']}%)"
-        markup.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"buy:{key}")])
-        
-    # Add Cancel
-    markup.inline_keyboard.append([InlineKeyboardButton(text="❌ Я передумал", callback_data="cancel_action")])
-        
-    # Add fake payment logic handler
-    await message.answer("💎 **Магазин NeuroCoin**\nВыберите пакет пополнения:", reply_markup=markup, parse_mode="Markdown")
+    await open_shop(message)
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def process_buy_callback(callback: CallbackQuery):
@@ -786,7 +795,7 @@ def get_cancel_menu():
 
 @dp.message(F.text == "🔙 Назад")
 async def cmd_back(message: types.Message, state: FSMContext):
-    # Retrieve user for main menu access level
+    await reset_user_navigation(message, state)
     user = await get_user(message.chat.id)
     level = user.tariff if user else 'demo'
     balance = user.balance if user else None
@@ -805,16 +814,12 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     level = user.tariff if user else 'demo'
     balance = user.balance if user else None
 
-    # Cleanup session
-    if message.chat.id in chat_sessions:
-        del chat_sessions[message.chat.id]
-
     current_state = await state.get_state()
     if current_state is None:
         await message.answer("А нечего отменять. Мы на старте.", reply_markup=get_main_menu(level, balance))
         return
 
-    await state.clear()
+    await reset_user_navigation(message, state)
     await message.answer("🚫 Операция отменена. Возвращаемся в главное меню.", reply_markup=get_main_menu(level, balance))
 
 @dp.message(F.web_app_data)
@@ -959,20 +964,14 @@ async def cmd_help(message: types.Message):
     await message.answer(help_text, parse_mode="Markdown", reply_markup=get_main_menu(level, balance))
 
 @dp.message(Command("pro"))
-@dp.message(F.text == "🍌 Pro")
-async def cmd_pro(message: types.Message, state: FSMContext):
-    await start_generation_flow(message, state, "nano_banana_pro")
-
 @dp.message(Command("flash"))
-@dp.message(F.text == "⚡ Flash")
-async def cmd_flash(message: types.Message, state: FSMContext):
-    await start_generation_flow(message, state, "nano_banana")
-
 @dp.message(Command("imagen"))
-@dp.message(F.text == "📸 Imagen")
-async def cmd_imagen(message: types.Message, state: FSMContext):
-    await start_generation_flow(message, state, "imagen")
-
+async def cmd_legacy_generation_entry(message: types.Message, state: FSMContext):
+    """Legacy commands are routed to a single workshop flow to avoid duplicated branches."""
+    await message.answer(
+        "ℹ️ Команды /pro, /flash и /imagen объединены в единый путь. Открываю мастерскую…"
+    )
+    await cmd_creation_entry(message, state)
 
 
 async def trigger_generation(message: types.Message, state: FSMContext):
@@ -1807,18 +1806,7 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
     
     # Check for Navigation / Cancel
     if text and (text == "🏠 Главное меню" or text.lower() in ["/start", "отмена", "cancel"]):
-         # Reset flow
-         await state.clear()
-         # Delete the config message to be clean?
-         data = await state.get_data()
-         config_msg_id = data.get("config_message_id")
-         if config_msg_id:
-             try:
-                 await message.bot.delete_message(message.chat.id, config_msg_id)
-             except:
-                 pass
-         
-         # Redirect to Start (Main Menu)
+         await reset_user_navigation(message, state)
          user = await get_user(message.from_user.id)
          await message.answer("🏠 **Главное меню**", reply_markup=get_main_menu(user.tariff, user.balance if user else None))
          return
@@ -1861,16 +1849,7 @@ async def process_creation_prompt(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "🏠 Главное меню")
 async def cmd_main_menu_text(message: types.Message, state: FSMContext):
-    await state.clear()
-    # Удаляем индикатор диалога, если был
-    data = await state.get_data()
-    indicator_id = data.get("dialogue_indicator_msg_id")
-    if indicator_id:
-        try:
-            await message.bot.delete_message(message.chat.id, indicator_id)
-        except:
-            pass
-        await state.update_data(dialogue_indicator_msg_id=None)
+    await reset_user_navigation(message, state)
     await cmd_start(message)
 
 @dp.message(F.text.startswith("👤 Мой кабинет"))
